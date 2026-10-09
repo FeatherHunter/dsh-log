@@ -4,7 +4,7 @@
 
 ### Issue tracker
 
-Issues live in GitHub Issues (FeatherHunter/dsh-log). See `docs/agents/issue-tracker.md`.
+Issues live as markdown files in `.scratch/`. See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 
