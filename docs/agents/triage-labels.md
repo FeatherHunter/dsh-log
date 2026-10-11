@@ -16,7 +16,7 @@ Edit the right-hand column to match whatever vocabulary you actually use.
 
 ## Wayfinder labels
 
-`/wayfinder` uses five additional labels alongside the triage roles above. Together they are the 10 core labels required in this repo's GitHub Issues (triage five + wayfinder five). Keep all ten; do not create only a subset.
+`/wayfinder` uses five additional labels alongside the triage roles above. Together they are the 10 core labels required in this repo's issue tracker (triage five + wayfinder five). Keep all ten; do not create only a subset.
 
 | Label in our tracker      | Meaning                                              |
 | ------------------------- | ---------------------------------------------------- |

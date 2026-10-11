@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>日志系统升级自查地图 · 调查报告（MAP 00）</title>
+<style>
+:root{--bg:#f7f7f8;--card:#fff;--ink:#1a1a1a;--muted:#666;--line:#e7e7e9;--red:#c81e1e;--amber:#b45309;--green:#15803d;--violet:#6d28d9;--blue:#1d4ed8}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.7 -apple-system,"PingFang SC","Microsoft YaHei",system-ui,sans-serif}
+.wrap{max-width:1080px;margin:0 auto;padding:28px 20px 60px}
+.hero{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:26px 28px}
+.hero h1{margin:.2em 0 .3em;font-size:26px;line-height:1.35}
+.kicker{display:inline-block;background:#ede9fe;color:var(--violet);border-radius:999px;padding:2px 12px;font-size:13px;font-weight:700}
+.meta{color:var(--muted);font-size:13px;margin-top:8px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:16px 0}
+@media(max-width:760px){.grid{grid-template-columns:1fr}}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px 20px;margin:14px 0}
+.card h2{margin:0 0 10px;font-size:19px}
+.card h3{margin:18px 0 8px;font-size:16px}
+.badge{display:inline-block;border-radius:999px;padding:1px 10px;font-size:12.5px;font-weight:700;border:1px solid}
+.b-red{color:var(--red);border-color:#fecaca;background:#fef2f2}
+.b-amber{color:var(--amber);border-color:#fde68a;background:#fffbeb}
+.b-green{color:var(--green);border-color:#bbf7d0;background:#f0fdf4}
+.b-violet{color:var(--violet);border-color:#ddd6fe;background:#f5f3ff}
+.b-blue{color:var(--blue);border-color:#bfdbfe;background:#eff6ff}
+table{width:100%;border-collapse:collapse;font-size:14px;margin:10px 0}
+th,td{border:1px solid var(--line);padding:8px 10px;vertical-align:top;text-align:left}
+th{background:#fafafa}
+code{background:#f1f1f3;border:1px solid #e4e4e7;border-radius:6px;padding:0 6px;font-family:ui-monospace,Consolas,monospace;font-size:13px}
+.small{font-size:13px;color:var(--muted)}
+.warn{border-left:4px solid var(--red);background:#fef2f2;padding:10px 14px;border-radius:8px}
+.ok{border-left:4px solid var(--green);background:#f0fdf4;padding:10px 14px;border-radius:8px}
+.info{border-left:4px solid var(--blue);background:#eff6ff;padding:10px 14px;border-radius:8px}
+ul.tight li{margin:4px 0}
+.footer{color:var(--muted);font-size:13px;margin-top:22px}
+a{color:var(--blue)}
+@media print{.wrap{max-width:none}body{background:#fff}.card,.hero{break-inside:avoid}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<div class="hero">
+<span class="kicker">wayfinder · MAP 00 调查报告（只调查，不 close、不改记录）</span>
+<h1>日志系统升级自查：七项能力与多插件隔离地图<br><span class="small">为什么 15/15 = 100% 却仍 open？我们缺什么能力？多插件共存会不会搞坏日志？</span></h1>
+<div class="meta">地图：日志系统升级自查：七项能力与多插件隔离地图（open） · 后端 markdown · effort <code>log-audit</code> · 取证时间 2026-10-09～11 · 本报告只读快照 + 逐票正文，不改票</div>
+<div class="grid">
+<div class="ok"><b>核心结论 1：</b>七项能力 + 隔离 + 对标共 <b>9 张真票已做完</b>，证据链深（源码行号 + 只读探针 + 独立复核），不是空关票。</div>
+<div class="warn"><b>核心结论 2：</b><b>15/15 是虚数。</b>另 6 张是临测清理票，对 Destination 零贡献。Destination 第三段 <b>升级建议清单</b>根本没开票，Not yet specified 5 条一条没毕业，所以 map 没 close 是对的。</div>
+</div>
+<div class="info"><b>你最关心的多插件问题：</b>现状是 <b>部分隔离</b> —— 3 层靠纪律、2 层根本不隔离。多插件同时装进 dsh，<b>今天就会互相踩</b>（开关互相抹、目录共写丢整批、全局散列被劫持）。升级必须先把隔离缺口封住，否则装得越多坏得越静默。详见第 4 章。</div>
+</div>
+
+<div class="card">
+<h2>1. 地图 Destination 对照（这张图到底要交付什么）</h2>
+<p><code>7 项能力（级别/文件/格式/轮转/聚合/链路追踪/追踪标识）有无判定 + 多插件全栈隔离冲突结论 + 升级建议清单。只决策不写代码。</code></p>
+<table>
+<tr><th>Destination 段</th><th>状态</th><th>依据</th></tr>
+<tr><td>7 项能力有无判定</td><td><span class="badge b-green">实质完成</span></td><td>7 张自查票各有 有/部分/无 + 行号 + 实测，见第 3 章</td></tr>
+<tr><td>多插件全栈隔离冲突结论</td><td><span class="badge b-green">实质完成</span></td><td>审查票给出五层判定 + electron-log 对标，见第 4 章</td></tr>
+<tr><td>升级建议清单</td><td><span class="badge b-red">未开始</span></td><td>Not yet specified 5 条未毕业，无票、无 Decision，见第 2 章</td></tr>
+</table>
+<p class="small">Standing：plan-don't-do（本图只决策不交付）；具体代码实现 / 逐插件适配 / 自动上报实现本身在 Out of scope，升级另起执行。</p>
+</div>
+
+<div class="card">
+<h2>2. 为什么 100% 却未 close（不要轻信数字）</h2>
+<h3>2.1 分母被污染：15 = 9 真 + 6 测</h3>
+<table>
+<tr><th>分组</th><th>票（按名称指代，不用裸号）</th><th>关闭性质</th><th>计入进度？</th></tr>
+<tr><td>真活 9 张</td><td>自查：日志文件是否具备；自查：日志级别是否具备；自查：日志轮转是否具备；自查：日志格式是否具备；自查：日志聚合是否具备；自查：链路追踪是否具备；自查：追踪标识是否具备；审查：多插件全栈隔离是否冲突、能否隔离；调研：成熟 TS/前端日志库做法与可否照搬</td><td>有 Question + 进度 + Answer + <code>research/*.md</code>，Status:resolved</td><td><span class="badge b-green">应计</span></td></tr>
+<tr><td>测试 6 张</td><td>Question（空标题票）；【临测·四缺陷复核·勿动】C1 对照 / C2 自带骨架 / C3 自带标题 / C4 回环 / C7 进度</td><td>正文仅“正文/对照用正文”，关闭理由统一为 2026-10-11 实验性测试票清理</td><td><span class="badge b-red">不应计</span></td></tr>
+</table>
+<p class="small">全量 list 共 16 行 = 1 map + 15 child，markdown 后端内无游离票。GitHub #1–#10 仍在旧后端，切回可见，本轮未核（收尾前建议补核）。</p>
+<h3>2.2 地图正文自相矛盾</h3>
+<ul class="tight">
+<li><code>## Tickets</code> 只列 9 票，且第 10 项写 <code>- [ ] 调研：成熟库（本轮关闭归档）</code> 未勾选，但快照里该票已 closed —— 清单 stale。</li>
+<li>Decisions so far 有 9 条真结论，缺升级建议一条，清单与 Decisions 对不上 15。</li>
+</ul>
+<h3>2.3 Not yet specified 5 条一条没毕业（全部指向升级建议）</h3>
+<ol>
+<li>升级建议的具体条目（待 8 票收齐后成票）</li>
+<li>轮转/聚合/追踪若判无，其方案选型（外部对标已回流，待成票）</li>
+<li>隔离若实锤冲突，其修复方案（待隔离票结论后成票——现已实锤部分隔离）</li>
+<li>升级建议须满足全量无抑制（Q1=A、Q2=B 已定；队列满 Q5 / 门禁红黄 Q6 待 R2）</li>
+<li>追踪标识字段名与接入通路（无保留字须自定；落盘顶层键一处硬定；宿主是否把 sessionId/callId 交给插件未核）</li>
+</ol>
+<div class="warn"><b>调查定性：</b>无漏关、无误开需纠正（测试票关得对，只是利用它凑数不对）。真正缺的是“升级建议”这一整段。不是忘了 close，是 close 条件没满足。</div>
+</div>
+
+<div class="card">
+<h2>3. 我们缺什么能力（按“有 / 部分 / 无”说人话）</h2>
+<p class="small">判定尺度：包内自己产生或自己保证才叫具备；调用方手塞字段、手动翻文件不算具备。Q5/Q6 未定处已标待定，不替它裁。</p>
+<table>
+<tr><th>能力（票名）</th><th>判定</th><th>缺什么（升级必须补）</th></tr>
+<tr><td>自查：日志文件是否具备</td><td><span class="badge b-amber">部分具备</span></td><td>缺 <b>零丢失</b>：队列满连 error 也丢；0ms 定时器致退出全丢；写盘失败只计数且 <code>ready</code> 仍 resolved；多进程同目录读改写无锁整批丢。另 6 条 README 出入。</td></tr>
+<tr><td>自查：日志级别是否具备</td><td><span class="badge b-amber">部分具备</span></td><td>四级有但运行期不拦越界级别；归类只在数据模型层，运行期靠 43 条手写名单；开关 Q2=B 部分成立但 <b>落盘零丢弃不成立</b>（客户端满队 error 照丢，实测 100 条塞满后 error 丢失）。</td></tr>
+<tr><td>自查：日志轮转是否具备</td><td><span class="badge b-amber">部分（退化）</span></td><td>缺三环：按大小切分无（无测体积、无阈值，单日 5MB 仍单文件）；按时间仅按天分桶，无轮转事件/封存/压缩；清理无（40 天 40 文件）。<code>logClear</code> 只是手动手段，不是保留策略。对标 winston-daily-rotate-file 差整条链路。</td></tr>
+<tr><td>自查：日志格式是否具备</td><td><span class="badge b-amber">部分具备</span></td><td>JSON 行有、清单验形有、检查器有；但 <b>语义零落地</b>：清单外字段照落、明文密钥照落、<code>codes/rules/guard</code> 零实现；BigInt/循环整行静默丢。门禁红灯=抑制，抑制式设计待 Q6。</td></tr>
+<tr><td>自查：日志聚合是否具备</td><td><span class="badge b-amber">部分具备</span></td><td>仅同插件 client→宿主一条通道；<b>跨插件集中无、查询无</b>（<code>logExport</code> 只读一天一文件，多参忽略）。README“不自动上报”成立。</td></tr>
+<tr><td>自查：链路追踪是否具备</td><td><span class="badge b-red">无</span></td><td>不生成 id、不继承上下文、不打序号，30 词 29 词零命中。调用方自塞 <code>fields</code> 能手工串，但那不是系统能力。对标 roarr adopt+sequence 全缺。</td></tr>
+<tr><td>自查：追踪标识是否具备</td><td><span class="badge b-red">无</span></td><td>落盘 <code>{ts,level,event,fields}</code> 一条都不带请求级标识；字段名须自定；顶层键一处硬定；宿主 sessionId 通路未核。</td></tr>
+<tr><td>调研：成熟库做法</td><td><span class="badge b-blue">无照搬</span></td><td>结论：pino 作底座、轮转抄 daily-rotate-file、链路抄 roarr、多入口对标 electron-log，丢弃类不抄，门禁自建。升级照此抄作业即可，不用重选型。</td></tr>
+</table>
+<p class="small">一句话缺口清单：零丢失 / 大小轮转+保留 / 跨插件集中+检索 / 请求级串联（id+上下文+序号）/ 每条必带标识 / 清单语义落地 + 脱敏接线 / 隔离后两层命名空间。全部只决策未写代码。</p>
+</div>
+
+<div class="card">
+<h2>4. 多插件同时集成专章（你点名的必答题）</h2>
+<div class="warn"><b>要求重申：</b>日志系统会被多个 dsh 插件同时集成，同时装在 dsh 中，<b>不能因为多装就异常</b>（丢行、串目录、开关互改、散列被劫持、启动即错都算异常）。现状做不到，升级必须先封隔离缺口。</div>
+<h3>4.1 五层判定（审查票结论原样）</h3>
+<table>
+<tr><th>层</th><th>现状</th><th>多装会发生什么（已实测）</th></tr>
+<tr><td>电话名 prefix</td><td><span class="badge b-amber">部分隔离（唯一有硬门禁）</span></td><td>共表则撞名抛错不覆盖；各用各表则静默同名。注册非原子：抛错后表里已留 2 个电话，另 3 个静默缺失。</td></tr>
+<tr><td>落盘目录 logDirName</td><td><span class="badge b-amber">部分（靠约定，无校验）</span></td><td>覆盖值零校验（<code>'../escaped'</code> 都收）。同名后 A 导出读到 B 的行；A <code>logClear(all)</code> 把 B 的行一起删；同进程共写 5 轮每轮只活 1 行。</td></tr>
+<tr><td>开关文件 switchFileName</td><td><span class="badge b-amber">部分（靠约定，无校验）</span></td><td>同名后 B 建库即读到 A 的值；最后写者说了算。开关读回一次性，同实例二次不重读。</td></tr>
+<tr><td>客户端存储键 <code>dsws.debug</code></td><td><span class="badge b-red">不隔离</span></td><td>全插件单键，前缀不参与键名，注释自认不参数化。A 开→B 读到 true 且 debug 真入队；B 关/对账把 A 抹成 false。双向可写。</td></tr>
+<tr><td>全局函数 <code>dswsLogHash/dswsLogTrunc</code></td><td><span class="badge b-red">不隔离</span></td><td>调用时实时读全局，一份实现服务全进程。后挂盖先挂，不重建实例即生效，撤掉才回落。</td></tr>
+</table>
+<h3>4.2 最危险的三条（多装必踩）</h3>
+<ul class="tight">
+<li><b>忘传配置 = 落 <code>wf</code>：</b>任何声明 <code>wf</code> 的第三方不写覆盖字段就默认撞 <code>logs / log-switch.json / wf.*</code>，四样全撞且不报错。</li>
+<li><b>扁平 cacheDir 互踩：</b>拿别人的开关文件名当自己的目录名，后来者写盘失败、先到者无损，静默坏。</li>
+<li><b>electron-log 对标教训：</b>多实例≠隔离。共享注册表/共享文件/共享 handler 会导致一个实例轮转 <code>rename</code> 掉别人正在写的文件。本包同目录共写更差：读改写无锁，直接整批丢行。</li>
+</ul>
+<h3>4.3 “不异常”的验收线（升级建议必须写进门禁）</h3>
+<ul class="tight">
+<li>标识互异 + 无覆盖时：目录/开关/电话互相不可见，导出互不串，清空互不删。</li>
+<li>标识相同或显式同名时：要么硬报错，要么按租户分桶，绝不静默串行、静默删行、静默改开关。</li>
+<li>存储键与全局函数必须命名空间化，否则多装即互改，永远达不到“互不知”。</li>
+<li>现有两套单测只有单插件断言且在本仓跑不起来（老 monorepo 路径），隔离层零覆盖——升级必须补双插件对照测试。</li>
+</ul>
+<p class="small">证据：<code>research/08-plugin-isolation.md</code>（44KB，66 处行号抽查全命中）+ 4 支只读探针 + electron-log@5.4.4 一手对标。未改任何代码。</p>
+</div>
+
+<div class="card">
+<h2>5. 建议（待你定夺）</h2>
+<h3>选项 A（推荐）：补齐再 close</h3>
+<p>把 5 条雾区毕业成 1–2 张升级建议票（含 Q5/Q6 取舍、轮转保留策略、集中检索方案、追踪字段名与通路、隔离修复前置），做完再 close。Decisions 逐票追加 gist。</p>
+<h3>选项 B：现状收尾 close</h3>
+<p>承认升级另起执行图，本图以“自查判定完成”close。需在 Decisions 追加总结（每 closed 票一行 gist），并把本调查结论写进 map 正文（测试票性质、清单 stale、计数虚高据实注明）。</p>
+<h3>选项 C：先调记录再定</h3>
+<p>把 6 张测试票移出本图（或标 Out of scope 测试票）、修正 Tickets 清单第 10 项勾选，让计数回到 9/9 真数，再选 A/B。</p>
+<p class="small">升级执行本身不在本图写代码（Out of scope），需新图。Q5/Q6 待 R2 会影响级别/格式/轮转口径，升级前必须先定，否则返工。</p>
+</div>
+
+<div class="card">
+<h2>附录：口径与证据索引</h2>
+<ul class="tight">
+<li>全量要求（用户立）：Q1=A 脱敏记名不记文、Q2=B 开关保留只管详细度落盘零丢弃、门禁红灯=抑制；队列满 Q5 / 门禁红黄 Q6 待 R2。</li>
+<li>术语：聚合=跨插件或跨进程集中收集与查询；链路=端到端串联；追踪标识=每条带的 trace/requestId；隔离=全栈五层。</li>
+<li>证据文件：<code>research/02-log-file-capability.md</code> / <code>03-log-level</code> / <code>04-log-rotation（354行81引用）</code> / <code>05-log-format</code> / <code>06-log-aggregation</code> / <code>07-trace-capability</code> / <code>09-trace-identifier（393行）</code> / <code>08-plugin-isolation（44KB）</code> + <code>.local/selfcheck-*.mjs</code> 只读探针。</li>
+<li>计数说明：快照 15/15 closed、open 0、frontier 0；正文 Tickets 列 9 票；list 16 行。本报告未改任何票，只读。</li>
+</ul>
+</div>
+
+<div class="footer">生成方式：只读 deck_map_snapshot(thin) + deck_issue_get(blocking=false) + deck_issue_list(all)；未调用 close/patch/link。如需把本结论写回 map 正文或起升级建议票，请回复 A/B/C。</div>
+</div>
+</body>
+</html>
