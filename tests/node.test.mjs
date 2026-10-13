@@ -223,4 +223,81 @@ describe('Node 程序入口：日志包能在独立 Node 程序里直接用', ()
       await rm(cacheDir, { recursive: true, force: true })
     }
   })
+
+  // 下面两条是 2026-10-14 独立对抗审查必改 #2/#3 的回归线：ready 从前写一行 debug 级
+  // log.flush.marker 当路标——默认开关关着时它自己是 skipped（基准行根本不落盘，靠 6 轮
+  // flushNow + 10ms 蒙混），而且写盘失败时 ready 照样 resolve，调用方以为落定了、磁盘零行。
+  it('ready 回执说真话：落定了 ok 为真；写盘失败时 ok 为假并给出 pending 与最近一次失败', async () => {
+    const mod = await freshNodeEntry()
+    const cacheDir = await makeCacheDir()
+    let failWrites = false
+    const mem = new Map()
+    const flaky = {
+      resolve: async (p) => ({ path: p }),
+      readText: async (t) => (mem.has(t.path) ? mem.get(t.path) : ''),
+      writeText: async (t, text) => {
+        if (failWrites) throw new Error('模拟磁盘写不了')
+        mem.set(t.path, text)
+      },
+      mkdir: async () => {}
+    }
+    const diskText = () => {
+      let text = ''
+      for (const [k, v] of mem) if (k.endsWith('.log')) text += v
+      return text
+    }
+    try {
+      const log = await mod.createNodeHostLog(
+        { cacheDir, fs: flaky },
+        { pluginId: 'ready-report', prefix: 'ready-report' }
+      )
+      // ① 落定路径：ok 为真，且没有内部基准行混进用户文件
+      log.store.log('warn', 'ready.ok.row', { n: 1 })
+      const good = await log.ready
+      assert.equal(good.ok, true)
+      assert.equal(good.pending, 0)
+      assert.equal(good.lastPersistFail, null)
+      assert.match(diskText(), /"event":"ready\.ok\.row"/)
+      assert.ok(!diskText().includes('log.flush.marker'), '内部基准行不许进用户文件')
+
+      // ② 写盘失败路径：ok 为假、pending > 0、定位元有形，磁盘上不许有这一行
+      failWrites = true
+      log.store.log('error', 'ready.fail.row', { n: 2 })
+      const bad = await log.ready
+      assert.equal(bad.ok, false)
+      assert.ok(bad.pending > 0, '没落定就要如实报 pending')
+      assert.ok(bad.lastPersistFail, '要给出最近一次失败的定位元')
+      assert.equal(bad.lastPersistFail.op, 'writeBatch')
+      assert.equal(bad.lastPersistFail.reason, 'write-fail')
+      assert.ok(!bad.lastPersistFail.dirHash.includes(cacheDir), '定位元不带真实路径')
+      assert.ok(!diskText().includes('ready.fail.row'), '写失败的行不能假装落盘')
+
+      // ③ 磁盘恢复后再读一次 ready：行补落盘、回执转真
+      failWrites = false
+      const recovered = await log.ready
+      assert.equal(recovered.ok, true)
+      assert.equal(recovered.pending, 0)
+      assert.match(diskText(), /"event":"ready\.fail\.row"/)
+    } finally {
+      await rm(cacheDir, { recursive: true, force: true })
+    }
+  })
+
+  it('开关打开时也不写内部基准行：用户文件里只有用户的行', async () => {
+    const mod = await freshNodeEntry()
+    const cacheDir = await makeCacheDir()
+    try {
+      const log = await mod.createQuickLog(cacheDir)
+      await log.store.setSwitch(true)
+      log.store.log('info', 'ready.info.row', { n: 3 })
+      const report = await log.ready
+      assert.equal(report.ok, true)
+      const text = await readLogText(cacheDir, 'logs-quick')
+      assert.match(text, /"event":"ready\.info\.row"/)
+      assert.ok(!text.includes('log.flush.marker'), '开关打开也不许写内部路标行')
+      log.store.release()
+    } finally {
+      await rm(cacheDir, { recursive: true, force: true })
+    }
+  })
 })

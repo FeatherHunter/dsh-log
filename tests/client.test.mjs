@@ -480,4 +480,28 @@ describe('客户端引擎单测（#560）', () => {
     for (let i = 0; i < 4; i++) await l3.sendLogBatch()
     assert.equal(l3.getDroppedCount(), 1, '宿主自报 rejected=1 就按 1 算，实测 ' + l3.getDroppedCount())
   })
+
+  // 2026-10-14 独立审查 #4：客户端 log() 从前返回 undefined，而宿主 store.log() 回
+  // 'queued'|'skipped'|'dropped'，README 却称两者「同名同参同语义」——调用方看不出自己的
+  // info 到底记上了没有。现在两端同口径，本用例逐档钉住。
+  it('log 回执与宿主同口径：skipped（开关挡下）/ queued（真进队列）/ dropped（满队列丢新）', async () => {
+    const log = createClientLog(
+      { storage: makeStorage(), timer: makeTimer() },
+      { pluginId: 'rc-a', prefix: 'rc-a' }
+    )
+    // 开关关着：info 被挡下（不是丢），丢弃计数不动
+    assert.equal(log.log('info', 'rc.plain', {}), 'skipped')
+    assert.equal(log.logDroppedState.count, 0)
+    // error/warn 恒放行
+    assert.equal(log.log('warn', 'rc.warn', {}), 'queued')
+    assert.equal(log.log('error', 'rc.error', {}), 'queued')
+    // 开关打开后 info 记上
+    log.logSwitch.enabled = true
+    assert.equal(log.log('info', 'rc.on', {}), 'queued')
+    // 灌满队列：普通行满时丢新 → 回执说 dropped 且真计数
+    let outcome = 'queued'
+    for (let i = 0; i < 5000 && outcome === 'queued'; i++) outcome = log.log('info', 'rc.fill.' + i, {})
+    assert.equal(outcome, 'dropped')
+    assert.ok(log.logDroppedState.count > 0, '丢新必须计入丢弃数')
+  })
 })

@@ -20,7 +20,7 @@
 import { createQuickLog } from 'dsh-log/node'
 const log = await createQuickLog('/你自己决定的/日志目录')
 log.store.log('warn', 'your.step.fail', { step: 'fetch' })
-await log.ready   // Node 入口的 ready：基准行落定才算完，等它即前面每一行都已落盘
+await log.ready   // 读一次刷一次：把此刻为止的行刷到底，再给你回执 { ok, pending, lastPersistFail }
 ```
 
 > 同一**日志目录**（以及同一个开关文件）同一时刻只许一个活跃写者（0.3.0 口径）：实例的日志目录是 `<cacheDir>/logs-<pluginId>`（`pluginId` 为 `wf` 时为 `logs`，`quick` 缺省为 `logs-quick`）。
@@ -87,16 +87,16 @@ const log = await createNodeHostLog(
 )
 
 log.store.log('warn', 'my.step.fail', { step: 'fetch', reason: 'timeout' })
-await log.ready   // Node 入口的 ready：等这一下，前面每一行都已落盘
+const report = await log.ready   // 读一次刷一次；report.ok 为真才代表前面每一行都已落盘
 ```
 
 三件事要对上：
 
 1. **`cacheDir` 由你决定，入口不猜**。它不读任何环境变量、也没有默认路径；你要把日志放在自己的数据目录旁边，就把那个目录传进来。目录不存在时入口自己建。
 2. **`pluginId` 与 `prefix` 双必填**（缺任一即抛中文错，0.2.x 的「prefix 回退到 pluginId」已删），规则与插件侧一样：小写英文字母、数字、中横线，1 到 32 个字符。`pluginId` 决定落点：日志写在 `<cacheDir>/logs-<标识>/` 下按天一个文件，调试开关写在 `<cacheDir>/log-switch-<标识>.json`；`prefix` 决定电话名前缀（独立程序不注册电话，传成同一个标识最省心）。
-3. **`await log.ready` 不能省**。落盘是防抖加异步写的：程序自然跑完不会丢（Node 会等那个定时器），但结尾调了 `process.exit()`、抛错退出或被强杀，队列里还没写下去的那批就丢了（`warn` 与 `info` 一样会丢）。这一下会等到「前面写的每一行都已经在文件里」才返回；同进程里也可以改用 `await log.store.synced()`（刷完当期队列才 resolve），或先 `log.store.beforeExit()` 注册退出钩（重复调用只注册一次）。
+3. **`await log.ready` 不能省**。落盘是防抖加异步写的：程序自然跑完不会丢（Node 会等那个定时器），但结尾调了 `process.exit()`、抛错退出或被强杀，队列里还没写下去的那批就丢了（`warn` 与 `info` 一样会丢）。`log.ready` 是只读属性、**读一次刷一次**：取它那一刻把此刻为止入队的行刷到底，再回执 `{ ok, pending, lastPersistFail }`——`ok` 为真才算前面每一行都在文件里；写盘失败时 `ok` 为假、`pending` 是还压着的行数、`lastPersistFail` 给出最近一次失败的 `op`/`reason`/`dirHash`，磁盘恢复后再读一次就补落盘。同进程里也可以改用 `await log.store.synced()`（刷完当期队列才 resolve），或先 `log.store.beforeExit()` 注册退出钩（重复调用只注册一次）。
 
-**做完的判据**：跑一遍上面这段，`<cacheDir>/logs-<标识>/` 下出现当天日期的 `.log` 文件，文件里能看到那一行 JSON。想验证第 3 条：把 `await log.ready` 删掉，并在写完日志后加一行 `process.exit(0)`，那一行就不再落盘。
+**做完的判据**：跑一遍上面这段，`<cacheDir>/logs-<标识>/` 下出现当天日期的 `.log` 文件，文件里能看到那一行 JSON（只有用户的行，没有内部路标行）。想验证第 3 条：把 `await log.ready` 删掉，并在写完日志后加一行 `process.exit(0)`，那一行就不再落盘。
 
 与插件侧的差别，一眼看清：
 
@@ -222,7 +222,7 @@ if (clientLog.isEnabled('info')) {
 }
 ```
 
-上面这条是常驻信息事件：事件名 `my-plugin.hello`，级别 `info`，归类 `resident`，允许字段只有 `step`。下面第 3 步检查器示例用的正是这条，上下两环对上了。
+上面这条是常驻信息事件：事件名 `my-plugin.hello`，级别 `info`，归类 `resident`，允许字段只有 `step`。**`kind: 'resident'` 是运行期真生效的**（0.3.0 起）：写侧放行集合 = 包内固定 43 个 DSH 常驻名 ∪ 清单里标了 `resident` 的事件名，所以 `my-plugin.hello` 这类 `info` 在调试开关关着时也照样落盘；没标 `resident` 的 `info` 仍只在开关打开时记（返回 `'skipped'`，不计入丢弃数）。下面第 3 步检查器示例用的正是这条，上下两环对上了。
 
 2. 自己读成对象再传给 `eventList`（日志包不读盘；`prefix` 与 `pluginId` 双必填，别忘了）：
 

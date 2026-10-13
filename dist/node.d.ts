@@ -6,6 +6,20 @@ import type { LogFileService, LogTimer } from './store.js';
 export type { HostLog } from './host.js';
 export type { HostLogConfigInput, PhoneNameMap } from './config.js';
 export type { LogFileService, LogStore, LogStoreDeps, LogTimer } from './store.js';
+/** `ready` 的回执：刷到底之后，前面那些行到底落没落定。 */
+export interface NodeReadyReport {
+    /** true = 队列与重试位都空了，前面每一行都已经在文件里。 */
+    ok: boolean;
+    /** 还压着没落定的行数（队列 + 重试位 + 待补写的自监控诊断行）；ok 为真时是 0。 */
+    pending: number;
+    /** 最近一次写盘失败的定位元（op / reason / dirHash / at）；没失败过就是 null。 */
+    lastPersistFail: {
+        op: string;
+        reason: string;
+        dirHash: string;
+        at: number;
+    } | null;
+}
 export interface NodeCacheDirDeps {
     /** 日志与开关文件的落点，由调用方决定；本入口自己建这个目录，不读环境变量、不带默认值。 */
     cacheDir: string;
@@ -26,10 +40,10 @@ export interface NodeCacheDirDeps {
  *
  * 返回的对象里，store 是日志库本体（isEnabled / log / flush / getDroppedCount 等），
  * phoneNames 只是照标识派生出来的名字，本入口不注册电话、独立程序也用不着；
- * ready 是一个 Promise，等它等于等日志真的进了当天文件。
+ * ready 是一个 Promise<NodeReadyReport>，等它等于等日志刷到底，并且如实告诉你落没落定。
  */
 export declare function createNodeHostLog(deps: NodeCacheDirDeps, configInput: HostLogConfigInput): Promise<HostLog & {
-    ready: Promise<void>;
+    ready: Promise<NodeReadyReport>;
 }>;
 /**
  * 默认快捷入口（#19 P0 门）：一行可用的落盘日志。
@@ -45,5 +59,5 @@ export declare function createNodeHostLog(deps: NodeCacheDirDeps, configInput: H
  *   await log.ready
  */
 export declare function createQuickLog(cacheDir: string, pluginId?: string): Promise<HostLog & {
-    ready: Promise<void>;
+    ready: Promise<NodeReadyReport>;
 }>;

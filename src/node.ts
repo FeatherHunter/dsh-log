@@ -17,11 +17,11 @@
 //     { pluginId: 'my-plugin', prefix: 'my-plugin' }   // 双必填：缺任一建库即抛中文错
 //   )
 //   log.store.log('warn', 'your.step.fail', { step: 'fetch', reason: 'timeout' })
-//   log.store.flush()
-//   await log.ready   // 短命程序：刷完等这一下，进程退出前日志才真的落盘
+//   const report = await log.ready   // 短命程序：刷完等这一下，进程退出前日志才真的落盘
+//   if (!report.ok) console.error('日志没落定', report.pending, report.lastPersistFail)
 //   log.store.release()  // 交还目录占用：同一目录的下一个实例才能接管
 
-import { readFile, readdir, mkdir } from 'node:fs/promises'
+import { mkdir } from 'node:fs/promises'
 import { realpathSync } from 'node:fs'
 import { join } from 'node:path'
 import { createNodeFileService } from './platform/fs-node.js'
@@ -30,13 +30,22 @@ export { createNodeFileService } from './platform/fs-node.js'
 export { createNodeTimer } from './platform/timer-node.js'
 import { createHostLog } from './host.js'
 import type { HostLog } from './host.js'
-import { parseLogFileName } from './config.js'
 import type { HostLogConfigInput, PhoneNameMap } from './config.js'
 import type { LogFileService, LogStore, LogStoreDeps, LogTimer } from './store.js'
 
 export type { HostLog } from './host.js'
 export type { HostLogConfigInput, PhoneNameMap } from './config.js'
 export type { LogFileService, LogStore, LogStoreDeps, LogTimer } from './store.js'
+
+/** `ready` 的回执：刷到底之后，前面那些行到底落没落定。 */
+export interface NodeReadyReport {
+  /** true = 队列与重试位都空了，前面每一行都已经在文件里。 */
+  ok: boolean
+  /** 还压着没落定的行数（队列 + 重试位 + 待补写的自监控诊断行）；ok 为真时是 0。 */
+  pending: number
+  /** 最近一次写盘失败的定位元（op / reason / dirHash / at）；没失败过就是 null。 */
+  lastPersistFail: { op: string; reason: string; dirHash: string; at: number } | null
+}
 
 export interface NodeCacheDirDeps {
   /** 日志与开关文件的落点，由调用方决定；本入口自己建这个目录，不读环境变量、不带默认值。 */
@@ -51,30 +60,6 @@ export interface NodeCacheDirDeps {
 
 // Node 适配器已下沉 platform/（S3）：createNodeFileService 在 platform/fs-node.ts、
 // createNodeTimer 在 platform/timer-node.ts；这里转出口，公开名与拆分前相同。
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(() => resolve(), ms)
-  })
-}
-
-/** 基准行有没有真的写进当天文件：写进去了，排在它前面的每一行就也进去了。 */
-async function markerLanded(store: LogStore, cacheDir: string, marker: string): Promise<boolean> {
-  try {
-    const logDir = join(cacheDir, store.config.logDirName)
-    const names = await readdir(logDir)
-    for (const name of names) {
-      // 单源解析器：基准行可能落在已封存的分段里，用 daily 正则会漏掉（0.3.0 接缝修复）。
-      if (!parseLogFileName(store.config, name)) continue
-      const text = await readFile(join(logDir, name), 'utf8')
-      if (text.includes(`"event":"${marker}"`)) return true
-    }
-    return false
-  } catch (e) {
-    void e
-    return false
-  }
-}
 
 // 目录键归一用的 realpath：拿不到（目录还不存在、权限不足、平台不支持）就退回原字符串，
 // 绝不让归一失败把建库挡下来——归一只影响「两个实例是否撞同一个键」，不影响真正写到哪。
@@ -97,12 +82,12 @@ function realCacheDir(dir: string): string {
  *
  * 返回的对象里，store 是日志库本体（isEnabled / log / flush / getDroppedCount 等），
  * phoneNames 只是照标识派生出来的名字，本入口不注册电话、独立程序也用不着；
- * ready 是一个 Promise，等它等于等日志真的进了当天文件。
+ * ready 是一个 Promise<NodeReadyReport>，等它等于等日志刷到底，并且如实告诉你落没落定。
  */
 export async function createNodeHostLog(
   deps: NodeCacheDirDeps,
   configInput: HostLogConfigInput
-): Promise<HostLog & { ready: Promise<void> }> {
+): Promise<HostLog & { ready: Promise<NodeReadyReport> }> {
   if (!deps || typeof deps.cacheDir !== 'string' || deps.cacheDir === '') {
     throw new Error('[dsh-log] 建 Node 日志库必须给 cacheDir：日志写到哪由调用方决定，本入口不猜位置')
   }
@@ -122,7 +107,7 @@ export async function createNodeHostLog(
     { fs, timer, getCacheDir: () => cacheDir, syncCacheDir: realCacheDir(cacheDir), DEFAULT_CWD: cacheDir },
     configInput
   )
-  const store = hostLog.store as LogStore & { flushNow?: () => Promise<void> }
+  const store = hostLog.store
 
   // 把上次留下的开关读回来。
   //
@@ -134,34 +119,40 @@ export async function createNodeHostLog(
     void e
   }
 
-  // 等队列真的落盘。
+  // 等队列真的落盘，并如实回报「落定没落定」。
   //
   // 为什么不是「调一次 flush 就完事」：刷盘是防抖加单写者，写盘正在进行时再叫一次会直接返回，
-  // 所以「叫过了」不等于「写完了」。这里放一条基准行当路标——它排在前面那些行之后写，
-  // 等它在文件里出现，就等于前面每一行都已经在文件里了。
-  const ready = (async () => {
-    const marker = 'log.flush.marker'
-    let flushed = false
+  // 所以「叫过了」不等于「写完了」。synced() 才是引擎里那条「刷到底」的路径
+  // （队列空 + 无在途刷盘 + 重试位空 + 闸门解除后的诊断行补写）。这里直接用它。
+  //
+  // 0.3.0 修正（2026-10-14 独立审查必改 #2/#3）：从前这里往用户日志里写一行 debug 级
+  // log.flush.marker 当路标，靠轮询它出现来判断「前面每一行都进了文件」。两个毛病：
+  //   ① debug 在开关关着时是 skipped —— 基准行默认根本不落盘，实际靠 6 轮 flushNow + 10ms 蒙混；
+  //   ② 写盘失败时照样 resolve —— 调用方以为落定了，磁盘上一行都没有。
+  // 现在不再往用户文件里塞内部路标行（那行会污染用户当天文件的第一行），改为回报真实状态：
+  // ok = 队列与重试位都空；没落定就 pending > 0、lastPersistFail 给出最近一次失败的定位元。
+  const settle = async (): Promise<NodeReadyReport> => {
     try {
-      store.log('debug', marker, {})
-      flushed = true
+      await store.synced()
     } catch (e) {
       void e
     }
-    for (let pass = 0; pass < 6; pass++) {
-      try {
-        if (typeof store.flushNow === 'function') await store.flushNow()
-        else store.flush()
-      } catch (e) {
-        void e
-      }
-      if (!flushed) return
-      if (await markerLanded(hostLog.store, cacheDir, marker)) return
-      await delay(10)
-    }
-  })()
+    const pending = typeof store.getPendingCount === 'function' ? store.getPendingCount() : 0
+    const lastPersistFail = typeof store.getLastPersistFail === 'function' ? store.getLastPersistFail() : null
+    return { ok: pending === 0, pending: pending, lastPersistFail: lastPersistFail }
+  }
 
-  return { store: hostLog.store, phoneNames: hostLog.phoneNames, ready }
+  // ready 是「读一次就刷一次」的只读属性，不是一个在建库时就结算好的 Promise。
+  // 为什么：建库那刻算好的 Promise 只覆盖那一刻之前入队的行——之后 log() 的行不在它的等待范围里，
+  // `await log.ready` 会立刻返回而磁盘上什么都没有（2026-10-14 探针实测：ok:true / pending:0 / 目录都还没建）。
+  // 取属性才执行，语义就变成「把此刻为止的行刷到底，再回执」，短命程序在任何时间点 await 都对。
+  return {
+    store: hostLog.store,
+    phoneNames: hostLog.phoneNames,
+    get ready(): Promise<NodeReadyReport> {
+      return settle()
+    }
+  }
 }
 
 /**
@@ -180,6 +171,6 @@ export async function createNodeHostLog(
 export async function createQuickLog(
   cacheDir: string,
   pluginId = 'quick'
-): Promise<HostLog & { ready: Promise<void> }> {
+): Promise<HostLog & { ready: Promise<NodeReadyReport> }> {
   return createNodeHostLog({ cacheDir: cacheDir }, { pluginId: pluginId, prefix: pluginId })
 }

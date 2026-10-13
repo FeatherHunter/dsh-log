@@ -4,6 +4,7 @@ import { LOG_FORMAT_VERSION, buildRowText, utf8Bytes } from '../core/row.js';
 import { findEvictableIndex } from '../core/admission.js';
 import { isErrorLevel, isUrgentLevel } from '../core/level.js';
 import { hash8 } from '../core/ids.js';
+import { residentEventSet } from '../core/resident.js';
 import { logFileDate } from '../core/file-name.js';
 import { createLater } from '../platform/later.js';
 export function createPipeline(input) {
@@ -141,26 +142,12 @@ export function createPipeline(input) {
     // 「稍后执行一次」的计时器适配在 platform/later.ts（平台层，引擎与组合根共用一份实现）。
     const later = createLater(timer);
     // 常驻事件（#731 一次性修好：信息级里标为常驻的那批，开关关着也落盘）。
-    // 为什么是名单而不是逐个开后门：以后新增常驻只改这张表，不用再碰判断；
-    // 名单与 research/489-appendix.md 第 1 章常驻 43 条一致，测试会拿附录与计数门禁逐项核对。
-    // （#782 补记：#746 的 naming.summary 落地时只进了附录与计数门禁，漏了这里四处名单，
-    //   开关关着时它被误拦；本票把 naming.summary 与新事件 cwd.persisted 一并补进。
-    //   2026-10-04 #817 补记：版本管理宿主侧 git 适配器的两条常驻事件 git.exec（每跑一次 git 外部命令一行）
-    //   与 git.exec.fail（等超时与起进程失败）同日补进四处名单，常驻数由 41 变 43。）
-    const RESIDENT_EVENTS = new Set([
-        'snapshot.request', 'snapshot.cache.miss', 'repo.resolve.tier', 'gh.exec',
-        'gh.timeout', 'gh.resolve.fail', 'graphql.fallback', 'issues.fallback',
-        'snapshot.built', 'panelSync.dirty', 'registry.select', 'detection.detect',
-        'skill.probe', 'skill.pending.cap', 'host.call', 'host.call.fail',
-        'snapshot.hydrate', 'backend.switch', 'naming.guard', 'naming.lock',
-        'panel.open', 'statusbar.fallback', 'dock.rehydrate', 'storage.fail',
-        'chain.derive.error', 'fallback.chain', 'client.snapshot.miss', 'host.start',
-        'update.install.exec', 'labelColors.write', 'guide.inject', 'healthCheck.inject',
-        'choiceStore.file.bad', 'choiceStore.write.fail', 'issues.page', 'sessionTickets.chain',
-        'chain.backoff', 'host.dispatch.empty', 'naming.summary', 'cwd.persisted',
-        'update.install.manifestSync',
-        'git.exec', 'git.exec.fail',
-    ]);
+    // 名单本体在 core/resident.ts（单源：包内固定 43 条 ∪ 调用方清单里 kind === 'resident' 的事件），
+    // 与 client/write.ts 共用同一份——两份名单漂移过一次（#782 只补了附录与计数门禁，漏了写侧）。
+    // 历史沿革与 43 条的出处见 core/resident.ts 的注释，别在这儿再抄一份。
+    // 认清单的意义（2026-10-14 独立审查）：外部插件把自己的 info 标成 resident 就能落盘，
+    // 不必为了几行轨迹去打开全局开关；DSH 侧行为不变（固定表仍是全集的子集）。
+    const RESIDENT_EVENTS = residentEventSet(config.eventList);
     // 读当前级别与事件名是否允许产生日志；关闭时调用处直接返回。错误与告警始终允许；
     // 信息级里落在常驻名单的也始终允许（#731 根因：从前只看级别，常驻信息全被开关拦掉）。
     // 第二个参数可选，老调用方只传级别时行为与从前一致，不会误放行。

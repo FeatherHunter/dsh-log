@@ -1,7 +1,10 @@
+import type { LogOutcome } from '../core/outcome.js';
 import type { ClientQueuedRow, ClientSendResult, ClientTimer } from './types.js';
 export interface WriteRigInput {
     /** 开关状态（住组合根，读时取当下值）。 */
     getSwitchEnabled: () => unknown;
+    /** 放行判定用的常驻事件集合（core/resident.ts 的 residentEventSet(config.eventList)）。 */
+    residentEvents: ReadonlySet<string>;
     /** 待发队列（就地增删）。 */
     queue: ClientQueuedRow[];
     dropped: {
@@ -26,7 +29,7 @@ export interface WriteRigInput {
     timer: ClientTimer | null;
 }
 export interface WriteRig {
-    log: (level: string, event: string, fields?: Record<string, unknown>) => void;
+    log: (level: string, event: string, fields?: Record<string, unknown>) => LogOutcome;
     isEnabled: (level: string, event?: string) => boolean;
     dropForRoom: (level: string) => void;
     scheduleLogFlush: (immediate: boolean) => void;

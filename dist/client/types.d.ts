@@ -1,4 +1,5 @@
 import type { PhoneNameMap } from '../config.js';
+import type { LogOutcome } from '../core/outcome.js';
 export interface ClientHost {
     call: (name: string, args?: unknown) => Promise<unknown>;
 }
@@ -79,7 +80,7 @@ export interface TraceWhy {
     detail: string;
 }
 export interface ClientLogFn {
-    (level: string, event: string, fields?: Record<string, unknown>): void;
+    (level: string, event: string, fields?: Record<string, unknown>): LogOutcome;
     child: (ctx?: ChildCtx) => ClientLog;
     why: () => TraceWhy;
 }

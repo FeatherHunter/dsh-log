@@ -3,6 +3,7 @@
 
 import type { LogEventList } from '../config.js'
 import type { PhoneNameMap } from '../config.js'
+import type { LogOutcome } from '../core/outcome.js'
 
 
 
@@ -152,8 +153,11 @@ export interface TraceWhy {
 
 
 // log 函数本体 + 命名空间化挂载（log.child / log.why 与顶层 child/why 同体）。
+// 回执与宿主侧 store.log() 同口径（都是 LogOutcome）：'queued' 真进队列、'skipped' 被开关挡下
+// （不是丢）、'dropped' 满队列丢新（真丢、计入丢弃数）。0.3.0 补：从前返回 undefined，
+// 于是「我的 info 到底记上了没有」在客户端侧完全看不出来（2026-10-14 独立审查 #4）。
 export interface ClientLogFn {
-  (level: string, event: string, fields?: Record<string, unknown>): void
+  (level: string, event: string, fields?: Record<string, unknown>): LogOutcome
   child: (ctx?: ChildCtx) => ClientLog
   why: () => TraceWhy
 }

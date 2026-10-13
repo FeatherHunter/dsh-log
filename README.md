@@ -12,7 +12,7 @@
 import { createQuickLog } from 'dsh-log/node'
 const log = await createQuickLog('/你自己决定的/日志目录')
 log.store.log('warn', 'your.step.fail', { step: 'fetch' })
-await log.ready   // Node 入口的 ready：基准行落定才算完，等它即前面每一行都已落盘
+await log.ready   // 读一次刷一次：把此刻为止的行刷到底，再给你回执 { ok, pending, lastPersistFail }
 ```
 
 > 同一**日志目录**（以及同一个开关文件）同一时刻只许一个活跃写者（0.3.0 口径）：实例的日志目录是 `<cacheDir>/logs-<pluginId>`（`pluginId` 为 `wf` 时为 `logs`，`quick` 缺省为 `logs-quick`）。
@@ -41,7 +41,7 @@ const res = await phones.handleLogQuery({ pluginId: 'wf' })
 if (res.denied) return '无权：只查自己插件的日志'
 ```
 
-宿主侧 `await store.synced()` 等落盘；Node 短命程序注册退出钩 `store.beforeExit()`（重复调用只注册一次），或直接 `await log.ready`（Node 入口的 ready，基准行落定判据）。
+宿主侧 `await store.synced()` 等落盘；Node 短命程序注册退出钩 `store.beforeExit()`（重复调用只注册一次），或直接 `await log.ready`（Node 入口的 ready：读一次刷一次，回执 `{ ok, pending, lastPersistFail }`，`ok` 为真才是真落定）。
 
 ## 0. 我该读哪儿
 
@@ -86,7 +86,7 @@ const log = await createNodeHostLog(
 )
 
 log.store.log('warn', 'your.step.fail', { step: 'fetch', reason: 'timeout' })
-await log.ready   // Node 入口的 ready：等这一下，前面每一行都已落盘
+const report = await log.ready   // 读一次刷一次；report.ok 为真才代表前面每一行都已落盘
 ```
 
 建库配置双必填：`pluginId` 与 `prefix` 都要显式传，缺任一即抛中文错（0.2.x 的「prefix 缺省回退到 pluginId」已删）。两者用同一套字符约束（小写英文字母、数字、中横线，1 到 32 个字符）。
@@ -95,9 +95,9 @@ await log.ready   // Node 入口的 ready：等这一下，前面每一行都已
 
 三条要知道的事：
 
-1. **`await log.ready` 不能省**。落盘是先入内存队列、再由约 1000 毫秒的防抖窗口异步写下去的：程序顺着事件循环自然跑完，Node 会等这个定时器，日志自己会落；但结尾调了 `process.exit()`、抛错退出或被强杀的程序，队列里还没写下去的那批就随进程消失（`warn` 与 `info` 一样会丢）。命令行工具通常在结尾显式退出，所以这条按必须处理。`log.ready` 返回时表示「前面写的每一行都已经在文件里」。同一件事也可以改用 `await log.store.synced()`（刷完当期队列才 resolve，口径见第 12 节步骤 4），或先 `log.store.beforeExit()` 注册退出钩（重复调用只注册一次）。
+1. **`await log.ready` 不能省**。落盘是先入内存队列、再由约 1000 毫秒的防抖窗口异步写下去的：程序顺着事件循环自然跑完，Node 会等这个定时器，日志自己会落；但结尾调了 `process.exit()`、抛错退出或被强杀的程序，队列里还没写下去的那批就随进程消失（`warn` 与 `info` 一样会丢）。命令行工具通常在结尾显式退出，所以这条按必须处理。`log.ready` 是**读一次刷一次**的只读属性：取它的那一刻，把此刻为止入队的行刷到底，再回执 `{ ok, pending, lastPersistFail }`——`ok` 为真表示队列与重试位都空了、前面每一行都在文件里；写盘失败时 `ok` 为假、`pending` 是还压着的行数、`lastPersistFail` 是最近一次失败的定位元（`op`/`reason`/`dirHash`，不含真实路径）。磁盘恢复后再读一次就会补落盘。同一件事也可以改用 `await log.store.synced()`（刷完当期队列才 resolve，口径见第 12 节步骤 4），或先 `log.store.beforeExit()` 注册退出钩（重复调用只注册一次）。入口**不往用户文件里写任何内部路标行**（0.3.0 修正：从前那行 debug 级 `log.flush.marker` 在开关关着时根本不落盘，等于没判据）。
 2. **开关每次新建时会被读回来**。独立程序每次调用都是新进程，所以入口建库时会把上次留下的开关读回来，打开的详细日志在下次调用仍然生效；写入用 `log.store.handleLogSetSwitch({ enabled: true })`。
-3. **级别规则与插件侧完全一致**：错误与告警恒落盘，常驻信息落盘，其余信息与调试只在开关打开时落盘。
+3. **级别规则与插件侧完全一致**：错误与告警恒落盘；`info` 只在开关打开时落盘，**除非这个事件名在常驻集合里**——常驻集合 = 包内固定 43 个 DSH 事件名 ∪ 调用方清单（`eventList`）里标了 `kind: 'resident'` 的事件名；`debug` 同样只在开关打开时落盘。
 
 ## 3. 三步接入（宿主侧）
 
@@ -137,7 +137,7 @@ registerHostLogPhones(new Map(), hostLog)
 | `maxQueue` | `1000` | 宿主内存队列上限，满时按级别丢弃、只计数不抛错 |
 | `maxSize` | `5242880`（5MB） | 单个当日日志文件的封存阈值（字节，按 UTF-8 计）；超了就把当日文件封存成 `<日期>.N.log` 再开新文件 |
 | `maxDays` | `14` | 保留天数：早于「今天往前 `maxDays - 1` 天」的封存件会被清掉（当日文件永不清） |
-| `eventList` | `null` | 事件清单注入点位（对象形式，见第 7 节；不传为 `null`，主路径零变化） |
+| `eventList` | `null` | 事件清单注入点位（对象形式，见第 7 节；不传为 `null`，主路径零变化）。清单里标了 `kind: 'resident'` 的事件，在开关关着时也照样落盘（字符串路径形式本包不读盘，那时只有包内固定 43 个常驻名放行） |
 
 四段式文件名的四段定死为日期点插件标识点进程号点启动时间：插件名取配置里的插件标识，进程号取不到时回退 0，启动时间取宿主建日志库那一刻（以启动头写入的 `pid` 与 `startedAt` 为准，里面的冒号与斜杠转写为中横线后才拼入）。清空与导出里按文件名匹配的正则随策略分支：`daily` 走按天正则，四段式走对应的四段正则。
 
@@ -174,7 +174,7 @@ const clientLog = createClientLog(
   { host, timer, storage, broadcastLogSwitch },
   { pluginId: 'wf', prefix: 'wf' }
 )
-clientLog.log('info', 'my.event', { step: 'started' })
+clientLog.log('info', 'my.event', { step: 'started' })   // info 需开关打开；想让某类 info 恒落盘就把事件标成 kind: 'resident'（第 7 节）
 ```
 
 客户端配置同样双必填：`pluginId` 与 `prefix` 都要显式传，缺任一即抛中文错；两端（宿主与客户端）传同一对值，拼出的电话名自然对上。
@@ -187,7 +187,7 @@ clientLog.log('info', 'my.event', { step: 'started' })
 
 日志器的调用面（`createClientLog` 的返回对象）里，接入要用的是下面两类；对象上还有队列、开关状态等内部字段，调用处可以直接读，改开关请走第二类里的两个方法：
 
-- 与宿主同名同参同语义的四个：是否允许记（`isEnabled`）、记一行（`log`）、立刻转发或刷盘（`flush`，客户端侧只管转发，不管落盘；调转发后约 1 秒可见、不调约 2 秒、错误与告警直通，见 INTEGRATION.md 步骤 4）、读累计丢弃数（`getDroppedCount`）。
+- 与宿主同名同参同语义的四个：是否允许记（`isEnabled`）、记一行（`log`，**回执也是同口径**的 `'queued' | 'skipped' | 'dropped'`：`skipped` 是被开关挡下、不是丢；`dropped` 是满队列丢新、计入丢弃数）、立刻转发或刷盘（`flush`，客户端侧只管转发，不管落盘；调转发后约 1 秒可见、不调约 2 秒、错误与告警直通，见 INTEGRATION.md 步骤 4）、读累计丢弃数（`getDroppedCount`）。
 - 客户端独有的两个开关动作（写开关界面时要用，最容易漏）：`setLogSwitch(是否开启)` 写开关（宿主生效才更新本地与内存；失败原因只给机器码），`reconcileLogSwitch()` 启动时向宿主对账（以宿主为准）。用法见 INTEGRATION.md 步骤 4 与步骤 6。
 
 ### 5.3 追踪链路（#24）
@@ -226,7 +226,7 @@ clientLog.log('info', 'my.event', { step: 'started' })
 
 ## 7. 对象清单、模板与检查器（#561）
 
-每条事件四样东西：事件名、级别（`error`、`warn`、`info`、`debug`）、允许字段（fields，清单内登记、自查用；运行期原样透传、不裁剪）、脱敏引用（`codes` 是截断或散列代号，`rules` 是具名正则名，都是引用名，命中只记规则名不记原文）。`kind` 只为计数服务：`resident` 常驻（始终落盘的轻量轨迹）、`ondemand` 按需（只在调试开关打开时记）、`selfmon` 自监控（日志管道自己的故障行）；三类条数由实现自算（`computeEventCounts`），清单里不再手填 `counts`（0.3.0 已删：解析时忽略，缺失也不抛）。`guard` 可选，一句话写清采样或节流，无特殊守卫不写。
+每条事件四样东西：事件名、级别（`error`、`warn`、`info`、`debug`）、允许字段（fields，清单内登记、自查用；运行期原样透传、不裁剪）、脱敏引用（`codes` 是截断或散列代号，`rules` 是具名正则名，都是引用名，命中只记规则名不记原文）。`kind` 三类：`resident` 常驻（**开关关着也落盘**的轻量轨迹）、`ondemand` 按需（只在调试开关打开时记）、`selfmon` 自监控（日志管道自己的故障行）；三类条数由实现自算（`computeEventCounts`），清单里不再手填 `counts`（0.3.0 已删：解析时忽略，缺失也不抛）。`guard` 可选，一句话写清采样或节流，无特殊守卫不写。
 
 空模板见包内的 `event-list.template.json`（模板里的 `pluginId` 换成自己插件的标识；模板已按 0.3.0 删掉 `counts`——老清单里若还留着那一行，解析时忽略，删不删都行。只含一条事件的最小填好例子见 INTEGRATION.md 步骤 5）。调用方把清单拼成对象传给 `eventList`：
 
@@ -241,7 +241,9 @@ const hostLog = createHostLog(
 )
 ```
 
-路径形式请调用方自己读成对象再传入，日志包不读盘（字符串直接传给 `eventList` 只存不解析，检查器收到字符串会报错并提示先读成对象）。对象形式的清单当场验形状，错了直接报错（含中文说明），不静默修补；数组形式同样被拦下（只收对象，数组多半是把事件表直接当成了清单）。
+路径形式请调用方自己读成对象再传入，日志包不读盘（字符串直接传给 `eventList` 只存不解析，检查器收到字符串会报错并提示先读成对象；这种情况写侧也读不到 `resident` 声明，只有包内固定 43 个常驻名照旧放行）。对象形式的清单当场验形状，错了直接报错（含中文说明），不静默修补；数组形式同样被拦下（只收对象，数组多半是把事件表直接当成了清单）。
+
+想让自己的 `info` 事件在开关关着时也落盘，就在清单里把它的 `kind` 写成 `resident`——写侧放行集合是「包内固定 43 个常驻名 ∪ 清单里 `kind: 'resident'` 的事件名」，宿主引擎与客户端共用同一份（`src/core/resident.ts`）。不写清单、或不标 `resident` 的 `info` 事件默认仍被开关拦掉（返回 `'skipped'`，不计入丢弃数）。
 
 检查器经宿主入口导出，都是纯函数，不新增日志事件：
 

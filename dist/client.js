@@ -25,6 +25,7 @@
 import { assertPluginId, buildLogQueryPhoneName, buildPhoneNames, CLIENT_BATCH_INTERVAL_MS, CLIENT_BATCH_MAX, CLIENT_PACKET_BYTES, CLIENT_QUEUE_MAX, LOG_FORMAT_VERSION, parseEventListManifest } from './config.js';
 // S2 下沉（领域层）：短 id（traceId/spanId）与短指纹单源一份，与宿主侧共用同一算法。
 import { genHex, hash8 } from './core/ids.js';
+import { residentEventSet } from './core/resident.js';
 import { createSwitchCache } from './client/switch-cache.js';
 import { createTraceRig } from './client/trace.js';
 import { estimateBatchBytes } from './client/transport.js';
@@ -141,16 +142,15 @@ export function createClientLog(deps, configInput) {
     const trace = createTraceRig({ state: traceState });
     const ensureSpanId = () => trace.ensureSpanId();
     const ensureTraceForLevel = (level) => trace.ensureForLevel(level);
-    // 常驻事件（#731 一次性修好：信息级里标为常驻的那批，开关关着也转发）。
-    // 为什么与宿主包用同一张表：两端放行口径必须一致，否则客户端拦掉的行宿主永远收不到；
-    // 名单与 research/489-appendix.md 第 1 章常驻 43 条一致，测试会拿附录逐项核对。
-    // （#782 补记：#746 的 naming.summary 落地时漏了这里四处名单，本票一并补进，另加新事件 cwd.persisted。
-    //   2026-10-04 #817 补记：版本管理宿主侧 git 适配器的两条常驻事件 git.exec 与 git.exec.fail
     // 主写路径已下沉 client/write.ts（S6）：留同名包装，调用点一字不改。
     // 发送面在写路径之后建立，用一次性转发解环（调用都发生在运行期，建库期不自杀）。
     let sendBatchRef = () => Promise.resolve({ ok: false, sent: 0 });
     const write = createWriteRig({
         getSwitchEnabled: () => logSwitch.enabled,
+        // 常驻集合单源在 core/resident.ts：包内固定 43 条 ∪ 调用方清单里 kind === 'resident' 的事件。
+        // 客户端清单由 createClientLog 的 configInput.eventList 传入（字符串路径形式本包不读盘，
+        // 那时只有固定 43 条放行，与 0.3.0 之前一字不差）。两端共用一份，防漂移。
+        residentEvents: residentEventSet(config.eventList),
         queue: logQueue,
         dropped: logDroppedState,
         forward: logForwardState,
@@ -161,6 +161,8 @@ export function createClientLog(deps, configInput) {
         sendLogBatch: () => sendBatchRef(),
         timer: timer
     });
+    // 回执与宿主侧同口径（LogOutcome）：'queued' 真进队列、'skipped' 被开关挡下（不是丢）、
+    // 'dropped' 满队列丢新（真丢、计入 logDroppedState.count）。
     const log = (level, event, fields) => write.log(level, event, fields);
     const isEnabled = (level, event) => write.isEnabled(level, event);
     const dropForRoom = (level) => write.dropForRoom(level);

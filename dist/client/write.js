@@ -11,20 +11,6 @@ import { relocateReservedFields, SHADOW_FIELD } from '../core/trace.js';
 // 与 client.ts 的公开常量同源（配置面），本地取同名以免搬动函数体。
 const LOG_FLUSH_MS = CLIENT_BATCH_INTERVAL_MS;
 const LOG_QUEUE_MAX = CLIENT_QUEUE_MAX;
-const RESIDENT_EVENTS = new Set([
-    'snapshot.request', 'snapshot.cache.miss', 'repo.resolve.tier', 'gh.exec',
-    'gh.timeout', 'gh.resolve.fail', 'graphql.fallback', 'issues.fallback',
-    'snapshot.built', 'panelSync.dirty', 'registry.select', 'detection.detect',
-    'skill.probe', 'skill.pending.cap', 'host.call', 'host.call.fail',
-    'snapshot.hydrate', 'backend.switch', 'naming.guard', 'naming.lock',
-    'panel.open', 'statusbar.fallback', 'dock.rehydrate', 'storage.fail',
-    'chain.derive.error', 'fallback.chain', 'client.snapshot.miss', 'host.start',
-    'update.install.exec', 'labelColors.write', 'guide.inject', 'healthCheck.inject',
-    'choiceStore.file.bad', 'choiceStore.write.fail', 'issues.page', 'sessionTickets.chain',
-    'chain.backoff', 'host.dispatch.empty', 'naming.summary', 'cwd.persisted',
-    'update.install.manifestSync',
-    'git.exec', 'git.exec.fail',
-]);
 export function createWriteRig(rig) {
     // 下面这些名字与搬运前的闭包自由变量同名，函数体除开关判定外一字不改。
     const getSwitchEnabled = rig.getSwitchEnabled;
@@ -37,13 +23,15 @@ export function createWriteRig(rig) {
     const ensureTraceForLevel = rig.ensureTraceForLevel;
     const sendLogBatch = rig.sendLogBatch;
     const timer = rig.timer;
+    const residentEvents = rig.residentEvents;
     // 读当前级别与事件名是否允许产生日志；关闭时调用处直接返回。错误与告警始终允许；
-    // 信息级里落在常驻名单的也始终允许（#731 根因：从前只看级别，常驻信息全被开关拦掉）。
+    // 信息级里落在常驻集合的也始终允许（#731 根因：从前只看级别，常驻信息全被开关拦掉）。
+    // 集合 = 包内固定 43 条 ∪ 调用方清单里 kind === 'resident' 的事件（core/resident.ts 单源）。
     function isEnabled(level, event) {
         if (isUrgentLevel(level))
             return true;
         try {
-            if (typeof event === 'string' && RESIDENT_EVENTS.has(event))
+            if (typeof event === 'string' && residentEvents.has(event))
                 return true;
             return getSwitchEnabled() === true;
         }
@@ -79,13 +67,14 @@ export function createWriteRig(rig) {
     // 但兜底拦不住调用前已求值的拼接，所以高频调用处仍必须写外层判断，不许省略。
     // 0.3.0 追踪：保留字 traceId/spanId/seq 永不拒收——冲突重命名进 fields._shadow 并 warn 计数，
     // error 本体照落；落盘行带 v:3（读侧先认 v，v!=3 跳过+计数不抛错）。
+    // 回执与宿主侧 store.log() 同口径（LogOutcome）：调用方能当场看出「记上了 / 被开关挡下 / 满了丢了」。
     function log(level, event, fields) {
         if (!isEnabled(level, event))
-            return;
+            return 'skipped';
         if (logQueue.length >= LOG_QUEUE_MAX) {
             dropForRoom(level);
             if (logQueue.length >= LOG_QUEUE_MAX)
-                return;
+                return 'dropped';
         }
         const userFields = fields && typeof fields === 'object' ? fields : {};
         // 保留字搬迁走 core/trace.ts 单源（#24：保留字永不整行拒收，冲突进 fields._shadow）。
@@ -141,7 +130,7 @@ export function createWriteRig(rig) {
         if (logQueue.length >= LOG_QUEUE_MAX) {
             dropForRoom(level);
             if (logQueue.length >= LOG_QUEUE_MAX)
-                return;
+                return 'dropped';
         }
         logQueue.push({
             v: LOG_FORMAT_VERSION,
@@ -154,6 +143,7 @@ export function createWriteRig(rig) {
             scheduleLogFlush(true);
         else
             scheduleLogFlush(false);
+        return 'queued';
     }
     // 安排一次转发：普通走 1000 毫秒防抖合并；错误与告警走直通（取消本次等待立刻发，
     // 但调用处仍只进队列就返回，不等转发完成，崩溃窗口只剩毫秒级）。
