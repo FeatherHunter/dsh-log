@@ -1,0 +1,57 @@
+# CI（2026-10-14 加）：本仓此前所有门禁都靠人记得跑，这里把它固化成三条作业。
+#
+#   ① 测试矩阵：ubuntu + windows 各跑 Node 22 / 24 —— `npm test`（pretest 会先 node build.mjs）、
+#      类型检查、快速长跑自检、打包冒烟。跨平台是刻意的：本仓开发在 Windows，但消费者多在 Linux。
+#   ② 变异表：只在 windows 上跑（脚本是 PowerShell，用 junction 挂 node_modules）。
+#      它证明「每条回归线都咬得住」——把修复改回旧行为必须变红，基线不绿则整表作废。
+#   ③ 打包冒烟：在测试作业里跑（见 ① 最后一步），另外单独给 ubuntu 一个作业方便一眼看出发行面结果。
+#
+# 注意：本仓没有 lockfile，用 `npm install` 而不是 `npm ci`。
+name: ci
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: 测试 ${{ matrix.os }} / node ${{ matrix.node }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: [22, 24]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: 装依赖
+        run: npm install --no-audit --no-fund
+      - name: 类型检查（直调 tsc，绕开失效的 .bin 垫片）
+        run: node node_modules/typescript/bin/tsc -p tsconfig.json
+      - name: 全量测试
+        run: npm test
+      - name: 长跑自检（快速模式，秒级）
+        run: node tests/soak.mjs 0 --fast
+      - name: 打包冒烟（真打包 + 真装进全新工程跑一行）
+        run: node scripts/pack-smoke.mjs
+
+  mutation:
+    name: 变异表 windows / node 22
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: 装依赖
+        run: npm install --no-audit --no-fund
+      - name: 构建（变异表跑的是 dist，先保证产物是当前源码的）
+        run: node build.mjs
+      - name: 变异表（基线不绿即整表作废；每条都必须 RED）
+        shell: pwsh
+        run: ./scripts/mutation-check.ps1

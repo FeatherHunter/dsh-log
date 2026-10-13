@@ -15,6 +15,8 @@ export function createPipeline(input) {
     const resolveTarget = input.io.resolveTarget;
     const readTarget = input.io.readTarget;
     const writeTarget = input.io.writeTarget;
+    const canAppend = input.io.canAppend;
+    const appendTarget = input.io.appendTarget;
     const sealCurrentFile = input.rotation.sealCurrentFile;
     const appendAudit = input.rotation.appendAudit;
     const retainSweep = input.rotation.retainSweep;
@@ -672,49 +674,77 @@ export function createPipeline(input) {
             const now = new Date();
             const fileName = resolveLogFileName(config, now, currentPid(), currentStartedAt());
             const dayKey = logFileDate(config, fileName) || String(formatDailyFileName(now)).replace(/\.log$/, '');
-            // 单次读改写：读旧文 + 拼新行 + 全文覆写。无追加原语下的最小封顶单元。
+            // 写盘两种形态（2026-10-14 补追加路）：
+            //   · 有 appendText 能力 → 稳态只追加新增行，写量 O(新增)；文件尺寸靠自己记，首触与「要封存之前」各读一次。
+            //   · 没有 → 读旧文 + 拼新行 + 全文覆写（无追加原语下的最小封顶单元）。
             // #21：写之前先判两件事——跨天了就顺手清过期（按天保留），这份当日文件要超阈值就先封存再写新文件。
             const doOnce = async () => {
                 const target = await resolveTarget(await joinLogPath(logDir, fileName));
+                const appendable = await canAppend();
+                const sizeKnown = fileName === expectedFileName && expectedFileBytes >= 0;
                 let existing = '';
                 let readOk = false;
-                try {
-                    existing = await readTarget(target);
-                    readOk = true;
+                let existingBytes = -1;
+                if (!appendable || !sizeKnown) {
+                    // 首触（或读改写模式）：读一次，既拿尺寸，也顺带查有没有别的写者。
+                    try {
+                        existing = await readTarget(target);
+                        readOk = true;
+                    }
+                    catch (eRead) {
+                        void eRead;
+                        existing = '';
+                    }
+                    existingBytes = readOk ? utf8Bytes(existing) : -1;
                 }
-                catch (eRead) {
-                    void eRead;
-                    existing = '';
+                else {
+                    // 追加模式的稳态：旧文不必读（我们不覆写它），尺寸用自己记的那个。
+                    existingBytes = expectedFileBytes;
                 }
                 let extra = '';
                 if (dayKey !== lastRetainDay) {
                     lastRetainDay = dayKey;
                     extra += await retainSweep(logDir, fileName, dayKey);
                 }
-                const existingBytes = utf8Bytes(existing);
                 // 跨进程可观测：读回来的长度与我们自己上次写完的长度对不上 → 有别的写者动过这份文件。
                 // 读失败（readOk 为假）不算：那是读不出来，不是被人改过。
                 if (readOk && fileName === expectedFileName && expectedFileBytes >= 0 && existingBytes !== expectedFileBytes) {
                     notePersistFail('writeBatch', 'foreign-write', logDir);
                 }
                 const pendingBytes = utf8Bytes(text);
+                if (appendable && !readOk && existingBytes > 0 && existingBytes + pendingBytes > config.maxSize) {
+                    // 封存是不可逆动作（改名），而追加模式下的尺寸是「自己记的」——别的写者若也追加过，记的就偏小。
+                    // 所以真封存之前确认一次实际长度；这次读同时把上面那条 foreign-write 判定补上。
+                    try {
+                        const confirmBytes = utf8Bytes(await readTarget(target));
+                        if (confirmBytes !== existingBytes) {
+                            notePersistFail('writeBatch', 'foreign-write', logDir);
+                            existingBytes = confirmBytes;
+                        }
+                    }
+                    catch (eConfirm) {
+                        void eConfirm;
+                    }
+                }
                 if (existingBytes > 0 && existingBytes + pendingBytes > config.maxSize) {
                     const seal = await sealCurrentFile(logDir, fileName, dayKey);
                     if (seal.ok) {
                         const sealedName = seal.sealed;
+                        const sealedBytes = existingBytes;
                         existing = '';
+                        existingBytes = 0;
                         await appendAudit(logDir, {
                             ts: Date.now(),
                             op: 'rotate.seal',
                             file: fileName,
                             sealed: sealedName,
-                            bytes: existingBytes,
+                            bytes: sealedBytes,
                             maxSize: config.maxSize
                         });
                         extra += buildRowText('info', 'log.rotate.seal', {
                             file: fileName,
                             sealed: sealedName,
-                            bytes: existingBytes,
+                            bytes: sealedBytes,
                             maxSize: config.maxSize
                         });
                     }
@@ -734,11 +764,20 @@ export function createPipeline(input) {
                         maxSize: config.maxSize
                     });
                 }
-                const payload = String(existing || '') + text + extra;
-                await writeTarget(target, payload);
-                // 记下我们写完的长度：下一次读回来若对不上，就是有别的写者动过（见上方 foreign-write 判定）。
-                expectedFileName = fileName;
-                expectedFileBytes = utf8Bytes(payload);
+                if (appendable) {
+                    // 追加路：不覆写旧文，只把新增行接到末尾；尺寸自己累加（封存过就从 0 起算）。
+                    const appended = text + extra;
+                    await appendTarget(target, appended);
+                    expectedFileName = fileName;
+                    expectedFileBytes = Math.max(existingBytes, 0) + utf8Bytes(appended);
+                }
+                else {
+                    const payload = String(existing || '') + text + extra;
+                    await writeTarget(target, payload);
+                    // 记下我们写完的长度：下一次读回来若对不上，就是有别的写者动过（见上方 foreign-write 判定）。
+                    expectedFileName = fileName;
+                    expectedFileBytes = utf8Bytes(payload);
+                }
             };
             try {
                 await doOnce();

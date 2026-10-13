@@ -4,6 +4,11 @@
 # 通用规则：所有 . 开头目录
 .*/
 
+# 例外：CI 工作流必须入库 —— GitHub 只认 .github/workflows/ 下的文件，
+# 被上面那条顺带忽略的话，push 上去也不会触发任何作业（2026-10-14 加 CI 时踩到）。
+!.github/
+!.github/workflows/
+
 # 已出现的三个目录（显式列出，便于阅读与回查）
 .dsh-vision-router/
 .local/

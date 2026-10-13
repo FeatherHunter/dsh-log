@@ -23,7 +23,11 @@ await log.ready   // 读一次刷一次：把此刻为止的行刷到底，再�
 > - `release()` 同步幂等；释放那一刻若还有一批正在写盘，交还会延后到这批写完（同步路径下写盘在途时第二个实例仍当场抛）。
 > - `await synced()` 会把闸门解除后攒下的诊断行也带出去；**闸门仍活**（对方还持有目录）时它合法滞留，此时 `getPendingCount()` 会如实大于 0，不会假报刷完。
 > - 同一 `cacheDir` 下不同 `pluginId` 各写自己的目录与开关文件，可以并存。
-> - **跨进程没有登记（风险提示，不是保证）**：登记表是模块副本级的，另一个进程看不见。不同时刷盘时两边的行都在；**真并发同目录会静默吃行**——两个进程同时刷盘时，后写者按自己读到的旧内容整份覆写，吃掉对方刚写的行（实测两进程各写 5 行、间隔 30 毫秒，10 行只剩 9 行；双方 `exit 0`，不增 `dropped`）。0.3.0 补了**事后可观测**：我们记得自己上次写完这份文件的字节数，下次读回来对不上就落一条 `log.persist.fail(reason: 'foreign-write')` 诊断行（零额外 IO，被吃掉的进程下一次刷盘时通常能自己发现；挡不住读改写窗口内的并发，也不猜被吃了几行）。正确做法仍然是一个日志目录只给一个写者。
+> - **跨进程没有登记（风险提示，不是保证）**：登记表是模块副本级的，另一个进程看不见，包不做跨进程协调。实际后果取决于你的文件服务**有没有 `appendText`**（依赖表见 [INTEGRATION.md](INTEGRATION.md) 步骤 2）：
+>   - **有追加能力**（`dsh-log/node` 的入口自带；宿主自己实现文件服务时包一层 `fs.appendFile` 即可）：两个进程**只会交错、不会互相覆写**。实测两进程同目录各写 8 行、每行都刷到底，16 行一行不少、无撕裂行（把整批攒起来一次追加也是 16/16）。
+>   - **没有追加能力**（只有读改写的宿主）：后写者按自己读到的旧内容整份覆写，会吃掉对方刚写的行（实测两进程各写 5 行、间隔 30 毫秒，10 行只剩 9 行；双方 `exit 0`、不增 `dropped`）。
+>   - 两种形态都补了**事后可观测**：我们记得自己上次写完这份文件的字节数，下次读回来对不上就落一条 `log.persist.fail(reason: 'foreign-write')` 诊断行（追加模式下在首触与「封存之前」各读一次，零额外 IO）。它只报告「有人动过」，不猜被吃了几行，所以 `dropped` 不会跟着涨。
+>   - 正确做法仍然是一个日志目录只给一个写者：并发追加虽然不丢行，但行与行之间会交错，同一条链路的时间先后不再可信。
 
 DSH 插件宿主侧（接线 3 步，运行依赖由宿主提供）：
 
@@ -301,14 +305,17 @@ npm publish --dry-run
 门禁跑法（改包后全跑，退出码全 0 才算过）：
 
 ```sh
-npm test                              # = node --test "tests/*.test.mjs"：宿主、客户端、事件清单、Node 入口、全栈隔离、轮转与保留、常驻级别（清单声明放行）、运行时行为（T7）、快照门禁、查询分页（#20）、追踪链路（#24）、端到端真机链路、接缝不变式（#25）、硬杀耐久（#23）、发行面（#27）、消费方类型编译（#27）、公开面快照、架构门禁（分层与环）——共十八个测试文件、node 自报 17 套（公开面快照与架构门禁同属门禁类）
+npm test                              # = node --test "tests/*.test.mjs"：宿主、客户端、事件清单、Node 入口、全栈隔离、轮转与保留、常驻级别（清单声明放行）、运行时行为（T7）、快照门禁、查询分页（#20）、追踪链路（#24）、端到端真机链路、接缝不变式（#25）、硬杀耐久（#23）、追加写、发行面（#27）、消费方类型编译（#27）、公开面快照、架构门禁（分层与环）——共十九个测试文件、node 自报 19 套
 node --test tests/snapshot.test.mjs   # 单跑快照确认制门禁
 node tests/update-snapshots.mjs       # 清单新增字段后：先把黄转绿再提交（这是更新快照，不是判绿）
+node scripts/pack-smoke.mjs           # 打包冒烟：真打包 + 真装进全新工程 + 真写一行（发行面一层）
 ```
+
+CI 已把上面这些固化成三条作业（`.github/workflows/ci.yml`）：测试矩阵在 **ubuntu 与 windows 各跑 Node 22 / 24**（含类型检查、`npm test`、快速长跑、打包冒烟）；变异表只在 windows 上跑（脚本是 PowerShell），**基线不绿即整表作废，出现一条不是 RED 的变异就 exit 1**；没有 lockfile，所以用 `npm install` 而不是 `npm ci`。
 
 快照门禁只有黄/红两档（#18 Q6）：黄 warn——清单新增字段但快照未更新（`tests/snapshot.test.mjs` 只警告不判红，跑 `node tests/update-snapshots.mjs` 一键更新即转绿，不阻排障）；红 error——未知事件名、envelope 非法（落盘行五键 `{v,ts,level,event,fields}` 中 `v` 不为 3 或形状不对）、事件总数突变（与 `tests/event-snapshots/_baseline.json` 比 ±超 5 且 `tests/event-snapshots/CHANGELOG.md` 无说明；红的是“无 changelog”不是字段本身，补说明后跑更新命令即转绿）。事件条数就记在 `tests/event-snapshots/` 这套快照里，别在文档里抄数字。
 
-`npm test` 的用例清单来自 `package.json` 的 `test` 脚本（上面那十八个文件、共 **168 例**；`pretest` 会先跑 `node build.mjs`，所以测试一定在最新产物上跑）。类型检查：`npm run typecheck`（脚本内已直调 `node node_modules/typescript/bin/tsc`，绕开仓库里那个指向失效路径的 `.bin/tsc` 垫片）。发行面那两套（`release-surface`、`consumer-types`）会把包按 junction 装进临时工程、用真 tsc 编译一次，所以「类型能不能被消费者用上」是门禁里跑出来的结论，不是文档里的承诺。
+`npm test` 的用例清单来自 `package.json` 的 `test` 脚本（上面那十九个文件、共 **173 例**；`pretest` 会先跑 `node build.mjs`，所以测试一定在最新产物上跑）。类型检查：`npm run typecheck`（脚本内已直调 `node node_modules/typescript/bin/tsc`，绕开仓库里那个指向失效路径的 `.bin/tsc` 垫片）。发行面那两套（`release-surface`、`consumer-types`）会把包按 junction 装进临时工程、用真 tsc 编译一次，所以「类型能不能被消费者用上」是门禁里跑出来的结论，不是文档里的承诺。
 
 ### 9.1 源码分层（贡献者视角）
 

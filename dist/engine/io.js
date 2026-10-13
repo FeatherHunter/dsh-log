@@ -57,5 +57,22 @@ export function createEngineIo(input) {
         }
         throw new Error('文件服务不可写');
     }
-    return { joinPath, joinLogPath, resolveTarget, readTarget, writeTarget };
+    // 追加能力的选择顺序与读/写一致：入口注入的 fs 优先，其次平台对象的 fs。
+    async function canAppend() {
+        if (fs !== undefined && fs !== null && typeof fs.appendText === 'function')
+            return true;
+        const platform = typeof getPlatform === 'function' ? await getPlatform() : null;
+        return Boolean(platform && platform.fs && typeof platform.fs.appendText === 'function');
+    }
+    async function appendTarget(target, text) {
+        if (fs !== undefined && fs !== null && typeof fs.appendText === 'function') {
+            return await fs.appendText(target, text);
+        }
+        const platform = typeof getPlatform === 'function' ? await getPlatform() : null;
+        if (platform && platform.fs && typeof platform.fs.appendText === 'function') {
+            return await platform.fs.appendText(target, text);
+        }
+        throw new Error('文件服务不支持追加');
+    }
+    return { joinPath, joinLogPath, resolveTarget, readTarget, writeTarget, canAppend, appendTarget };
 }

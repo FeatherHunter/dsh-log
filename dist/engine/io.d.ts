@@ -9,5 +9,7 @@ export interface EngineIo {
     resolveTarget: (pathStr: string) => Promise<unknown>;
     readTarget: (target: unknown) => Promise<string>;
     writeTarget: (target: unknown, text: string) => Promise<unknown>;
+    canAppend: () => Promise<boolean>;
+    appendTarget: (target: unknown, text: string) => Promise<unknown>;
 }
 export declare function createEngineIo(input: EngineIoInput): EngineIo;

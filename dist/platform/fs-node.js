@@ -3,7 +3,7 @@
 //
 // 日志包按「目标对象」读写文件（resolve 出来的是个薄对象），Node 标准库按路径字符串读写，
 // 这一层就是那个转接点。全包只有这里 import node:fs。
-import { readFile, readdir, mkdir, unlink, writeFile, rename } from 'node:fs/promises';
+import { readFile, readdir, mkdir, unlink, writeFile, rename, appendFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 // 把路径装成一个薄对象。
 function resolvePath(pathStr) {
@@ -38,6 +38,13 @@ export function createNodeFileService() {
             const target2 = targetPath(target);
             await mkdir(dirname(target2), { recursive: true });
             await writeFile(target2, text, 'utf8');
+        },
+        // 追加写（2026-10-14 补）：一次 appendFile 就是一次 O_APPEND 写，不读旧文、不覆写别人的行。
+        // 引擎用它把稳态刷盘的写量从 O(全文) 降到 O(新增)。
+        async appendText(target, text) {
+            const target2 = targetPath(target);
+            await mkdir(dirname(target2), { recursive: true });
+            await appendFile(target2, text, 'utf8');
         },
         async mkdir(dir) {
             await mkdir(String(dir), { recursive: true });

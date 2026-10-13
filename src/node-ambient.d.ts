@@ -14,6 +14,8 @@ declare module 'node:fs' {
 }
 
 declare module 'node:fs/promises' {
+  // 追加写（2026-10-14 补）：引擎用它把稳态刷盘的写量从 O(全文) 降到 O(新增)。
+  export function appendFile(path: string, data: string, encoding: string): Promise<void>
   export function mkdir(path: string, options?: { recursive?: boolean; mode?: number }): Promise<string | undefined>
   export function readFile(path: string, encoding: string): Promise<string>
   export function readdir(path: string): Promise<string[]>

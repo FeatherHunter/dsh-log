@@ -18,6 +18,10 @@ export interface LogFileService {
   // #21 封存用的原子改名（可选能力）：没有它就降级为「不封存、继续追加」，并记一行 info 自监控，
   // 绝不用「复制 + 截断」冒充原子——那会在中途失败时真丢数据。
   rename?: (from: unknown, to: unknown) => Promise<unknown>
+  // 追加写（可选能力，2026-10-14 补）：把 text 接到文件末尾，不读旧文、不覆写。
+  // 有它时每次刷盘的写量从 O(全文) 降到 O(新增)；并且两个写者撞上时只会交错、不会整篇覆写
+  // （读改写那条路才是「后写者吃掉对方刚写的行」的来源）。缺它就退回读改写，行为不变。
+  appendText?: (target: unknown, text: string) => Promise<unknown>
 }
 
 // 计时器最小形状（与宿主计时器同形）。
@@ -39,6 +43,7 @@ export interface LogPlatformFs {
   unlink?: (target: unknown) => Promise<unknown>
   listDir?: (dirTarget: unknown) => Promise<unknown>
   rename?: (from: unknown, to: unknown) => Promise<unknown>
+  appendText?: (target: unknown, text: string) => Promise<unknown>
 }
 
 export interface LogPlatform {

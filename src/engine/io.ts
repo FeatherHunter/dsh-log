@@ -17,6 +17,10 @@ export interface EngineIo {
   resolveTarget: (pathStr: string) => Promise<unknown>
   readTarget: (target: unknown) => Promise<string>
   writeTarget: (target: unknown, text: string) => Promise<unknown>
+  // 追加写能力（2026-10-14 补）：canAppend 先问「有没有」，appendTarget 才真的追加——
+  // 用能力查询而不是「抛错再兜底」，因为「没有追加原语」是正常形态（宿主只给读写时就走读改写）。
+  canAppend: () => Promise<boolean>
+  appendTarget: (target: unknown, text: string) => Promise<unknown>
 }
 
 export function createEngineIo(input: EngineIoInput): EngineIo {
@@ -76,5 +80,22 @@ export function createEngineIo(input: EngineIoInput): EngineIo {
     throw new Error('文件服务不可写')
   }
 
-  return { joinPath, joinLogPath, resolveTarget, readTarget, writeTarget }
+  // 追加能力的选择顺序与读/写一致：入口注入的 fs 优先，其次平台对象的 fs。
+  async function canAppend(): Promise<boolean> {
+    if (fs !== undefined && fs !== null && typeof fs.appendText === 'function') return true
+    const platform = typeof getPlatform === 'function' ? await getPlatform() : null
+    return Boolean(platform && platform.fs && typeof platform.fs.appendText === 'function')
+  }
+  async function appendTarget(target: unknown, text: string): Promise<unknown> {
+    if (fs !== undefined && fs !== null && typeof fs.appendText === 'function') {
+      return await fs.appendText(target, text)
+    }
+    const platform = typeof getPlatform === 'function' ? await getPlatform() : null
+    if (platform && platform.fs && typeof platform.fs.appendText === 'function') {
+      return await platform.fs.appendText(target, text)
+    }
+    throw new Error('文件服务不支持追加')
+  }
+
+  return { joinPath, joinLogPath, resolveTarget, readTarget, writeTarget, canAppend, appendTarget }
 }

@@ -9,11 +9,11 @@
 | 门禁 | 命令 | 当前结果 |
 | --- | --- | --- |
 | 类型 | `node node_modules/typescript/bin/tsc -p tsconfig.json` | exit 0（`.bin/tsc` 垫片坏，必须直调） |
-| 全量测试 | `npm test`（pretest 先 `node build.mjs`） | **168/168，18 套，exit 0** |
-| 变异表 | `pwsh -NoProfile -File .local/mutation-check.ps1` | **61 条，基线先全绿、逐条 RED、0 SKIP/0 GREEN**（见第五节） |
+| 全量测试 | `npm test`（pretest 先 `node build.mjs`） | **173/173，19 套，exit 0** |
+| 变异表 | `pwsh -NoProfile -File scripts/mutation-check.ps1`（随仓提交；调单条用 `-Only M63`） | **64 条，基线先全绿、逐条 RED、0 SKIP/0 GREEN**（见第五节） |
 | 长跑自检 | `node tests/soak.mjs 0 --fast` / `node tests/soak.mjs 6` | 快速模式通过；全量见第四节 |
 | 构建可复现 | `rm -rf dist && node build.mjs` | 产物与删除前逐字节一致 |
-| 发行面 | `npm pack --dry-run` | 93 文件、44 个 `.d.ts`、114.8 kB |
+| 发行面 | `npm pack --dry-run` | 93 文件、44 JS + 44 个 `.d.ts`、121.0 kB（体积以当次输出为准） |
 
 门禁的设计原则：**每条新断言都要配一条「故意改坏」的变异**，否则断言只是装饰。
 变异表本身也有诚实性要求——基线不绿就整表作废；跑完必须回显「替换是否真的生效」（有两条变异因为锚点没匹配到而静默 SKIP 过，见第五节）。
@@ -107,10 +107,33 @@
   但盘上同时出现 **4 条 `log.persist.fail(reason: 'foreign-write')`** —— 丢行不再是静默的（改造前这一场景
   是 0 诊断、0 计数）。这条探针是 opt-in 的（真跨进程，不进 `npm test`）。
 
+### 4c. appendText 能力：把「读改写」这条丢行路彻底绕开（用户 m07604 授权）
+
+同一目录多实例的丢行，根因是每次刷盘都「读整份 → 拼 → 整份覆写」，两个写者的读改写窗口一重叠就吃行。
+旧实现只有一个 `writeText`，所以躲不开；`rename` 早就论证过「能力协商」这条路，这里照同一模式补一个：
+
+- `src/platform/ports.ts`：`LogFileService` / `LogPlatformFs` 各加可选
+  `appendText?: (target, text) => Promise<unknown>`；`src/platform/fs-node.ts` 用 `appendFile` 实现；
+  `src/node-ambient.d.ts` 补 `appendFile`。（可选 + 缺失回退 = 能力协商，不是硬依赖。）
+- `src/engine/io.ts`：`canAppend()` / `appendTarget()`；`src/engine/pipeline.ts`：首触读一次定尺寸，
+  之后每批只追加，并**在封存前强制读一次确认**（免得把别人的行当成自己的旧尺寸吞掉）。
+- 写量对比（`.local/probe-append.mjs`，480 行、真磁盘）：改造前 `writeText` 24 次、**累计写 423660 字节**；
+  改造后 `writeText` **0 次**、`appendText` 12 次、**累计写 65240 字节**（约 1/6.5，写量 O(全文)→O(新增)）。
+- 跨进程真机（`.local/probe-xproc-append.mjs`，两进程各 8 行、row 与 batch 两种模式）：
+  **16/16 全落、0 被吃、0 撕裂行、0 条 `foreign-write`**（对照 4b 那次的 9/16）。
+- 回归线 `tests/append-write.test.mjs` 五例（真被用上 / 无能力的适配器照旧 / 追加路下轮转照旧 /
+  封存前确认不被绕掉 / 尺寸是累加的），变异 M62（无视能力）、M63（不累加尺寸）、M64（封存前不确认）。
+
+### 5. 无效变异与假覆盖（方法学）
+
 - **M45 无效**：把 `exports.types` 指向不存在的文件 → 测试仍绿，因为 TS 会退回同目录的 `node.d.ts`。
   改成掏空声明本体（TS2305）才 RED。
 - **M20 无效**：把 `flushNow` 在途分支改成返回已 resolve 的 promise → 咬不住，因为 `synced()` 自己用
   `flushInFlight !== null` 守循环，不依赖返回值。换成承重的 `while` 条件变异才 RED。
+- **M63 指错了用例（比假绿更隐蔽）**：模式写成 `追加路下轮转仍然对`，命中的是 ③（一批就超阈值，
+  尺寸记不累加也照样封存），于是表里报 GREEN；而真正为它写的 ⑤（多批**小**追加）手工单跑是 RED。
+  教训：变异报 GREEN 时先区分「断言没咬住」和「pattern 指错了用例」——给脚本加 `-Only <子串>`
+  并**非 RED 时打印原始输出**（本次就是靠原始输出看到只跑了 ③ 才定位）。
 - **M24 SKIP**：`node --test --test-name-pattern` 收的是**正则**，用例名里的 `()` 会被当空分组 →
   模式永远匹配不上、node 仍退 0 → 整张表把「根本没跑」误报成 GREEN。修法：`[regex]::Escape()` +
   只认输出里的 `✔/✖` 行。
