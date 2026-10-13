@@ -102,6 +102,10 @@
   **只事后发现，挡不住读改写窗口内的并发覆写，也不猜被吃了几行**（所以不谎报 dropped）。回归线
   `tests/runtime-t7.test.mjs` 两例（外部追加 → 恰一条 `foreign-write` 且对方的行不被覆写；自己连写三批 →
   零假诊断），变异 **M61** 咬住。README 第 1 节末条与第 6 节的 reason 取值表已同步。
+- **真机验证**（`.local/probe-xproc-detect.mjs`，两个真子进程、同一 `cacheDir` 同一 `pluginId`、各写 8 行、
+  每行都 `await log.ready` 逼出重叠窗口）：期望 16 用户行，**实落 9 行、8 行被吃（并发覆写照旧挡不住）**，
+  但盘上同时出现 **4 条 `log.persist.fail(reason: 'foreign-write')`** —— 丢行不再是静默的（改造前这一场景
+  是 0 诊断、0 计数）。这条探针是 opt-in 的（真跨进程，不进 `npm test`）。
 
 - **M45 无效**：把 `exports.types` 指向不存在的文件 → 测试仍绿，因为 TS 会退回同目录的 `node.d.ts`。
   改成掏空声明本体（TS2305）才 RED。
@@ -128,6 +132,9 @@
 
 - **A 段 内存风暴**：20k 行 error 穿过反复写失败 → 落盘 20000/20000、写盘 40 次、`dropped` 0、`pending` 0。
 - **B 段 真磁盘**：真临时目录 + 真轮转（小 `maxSize`）+ 查询 + 跨 pluginId 隔离。
+  2026-10-14 全量 6 分钟实跑（391.8 秒）：460 轮、18400 条 error + 18400 条 warn **全部落盘**、
+  459 个封存件与 459 条 audit 一一对应、查询到的用户行 36800 == 磁盘用户行 36800、`dropped` 0、
+  另一个 `pluginId` 的目录里没有混进本实例的行 → 打印「长跑自检通过」。
 - 用法：`node tests/soak.mjs 0 --fast`（秒级）/ `node tests/soak.mjs 6`（6 分钟）。
   它**不进** `npm test` 的 glob（`tests/*.test.mjs`），属于显式触发的地基检查。
 
