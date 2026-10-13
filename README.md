@@ -277,7 +277,7 @@ node build.mjs
 npm publish --dry-run
 ```
 
-`node build.mjs` 先跑 `tsc --noEmit` 类型检查，把 `src` 下 43 个可转译 TS（含子目录，按目录结构一对一转译；不含 `node-ambient.d.ts` 这类声明文件）写进 `dist`（转译优先用 esbuild，没装 esbuild 时自动回退 TypeScript 自带转译器），最后再用 `tsconfig.build.json` 产出与 `src` 同形的 `dist/**/*.d.ts`——**声明由 tsc 出，不由转译器猜**（缺一个声明，构建就报错退出）。发布白名单（`files`）打进 91 个文件：`dist` 下 43 个 JS + 43 个 `.d.ts`、`event-list.template.json`、`INTEGRATION.md`、`README.md`、`LICENSE`、`package.json`（`npm publish --dry-run` 实测：压缩包约 111 kB、解包约 349 kB；**体积与散列都以当次 dry-run 输出为准**，它们随打包时刻变化，本文件不再抄具体值）。加新文件进包时同步改 `files` 并重跑 dry-run 确认文件数；改了 `src` 必须重跑 build——本仓当前把 `dist` 一并提交，只改 `src` 不生成产物会留下过期实现。
+`node build.mjs` 先跑 `tsc --noEmit` 类型检查，把 `src` 下 44 个可转译 TS（含子目录，按目录结构一对一转译；不含 `node-ambient.d.ts` 这类声明文件）写进 `dist`（转译优先用 esbuild，没装 esbuild 时自动回退 TypeScript 自带转译器），最后再用 `tsconfig.build.json` 产出与 `src` 同形的 `dist/**/*.d.ts`——**声明由 tsc 出，不由转译器猜**（缺一个声明，构建就报错退出）。发布白名单（`files`）打进 93 个文件：`dist` 下 44 个 JS + 44 个 `.d.ts`、`event-list.template.json`、`INTEGRATION.md`、`README.md`、`LICENSE`、`package.json`（`npm publish --dry-run` 实测：压缩包约 115 kB、解包约 358 kB；**体积与散列都以当次 dry-run 输出为准**，它们随打包时刻变化，本文件不再抄具体值）。加新文件进包时同步改 `files` 并重跑 dry-run 确认文件数；改了 `src` 必须重跑 build——本仓当前把 `dist` 一并提交，只改 `src` 不生成产物会留下过期实现。
 
 门禁跑法（改包后全跑，退出码全 0 才算过）：
 

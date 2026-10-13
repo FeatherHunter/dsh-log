@@ -13,7 +13,7 @@
 | 变异表 | `pwsh -NoProfile -File .local/mutation-check.ps1` | 57 条，基线先全绿、逐条必须 RED（见第五节） |
 | 长跑自检 | `node tests/soak.mjs 0 --fast` / `node tests/soak.mjs 6` | 快速模式通过；全量见第四节 |
 | 构建可复现 | `rm -rf dist && node build.mjs` | 产物与删除前逐字节一致 |
-| 发行面 | `npm pack --dry-run` | 91 文件、44 个 `.d.ts`、110.1 kB |
+| 发行面 | `npm pack --dry-run` | 93 文件、44 个 `.d.ts`、114.8 kB |
 
 门禁的设计原则：**每条新断言都要配一条「故意改坏」的变异**，否则断言只是装饰。
 变异表本身也有诚实性要求——基线不绿就整表作废；跑完必须回显「替换是否真的生效」（有两条变异因为锚点没匹配到而静默 SKIP 过，见第五节）。
