@@ -29,8 +29,9 @@ DSH 插件宿主侧（3 行）：
 
 ```js
 import { createHostLog, registerHostLogPhones } from 'dsh-log/host'
+const registry = new Map()                                  // 这张表要留着：宿主调用通道按名字取它
 const hostLog = createHostLog(deps, { pluginId: 'wf', prefix: 'wf' })
-registerHostLogPhones(new Map(), hostLog)
+registerHostLogPhones(registry, hostLog)
 ```
 
 两条规矩（0.3.0）：保落盘认 `store.synced()`（已落地）——刷完当期队列、等到在途写盘真的收尾才 resolve，杀进程前调此即不丢；`store.flush()` 只管安排刷盘，调了不等于写完；查日志先判无权（查询电话名 = 前缀加 `.logQuery`，六参：`timeRange`、`pluginId`、`level`、`keyword`、`traceId`、`page`；宿主入口注册 5 个写侧动作加这个只读查询，共 6 个）：
@@ -72,7 +73,7 @@ npm install dsh-log
 
 `dsh-log/node` 与前两个的区别：它不碰电话层、也没有客户端转发，只有「把日志落到本地文件」以及它背后的级别规则、目录派生与失败计数。它**不决定日志写到哪**——目录由调用方传入，入口自己不读任何环境变量、也不带默认路径。
 
-**本包不做什么**（需要这三样得在调用方自己那层做）：不自动上报日志，只做本地落盘加手动导出；不自动轮转，也不自动清理旧文件。
+**本包不做什么**（要在调用方自己那层做）：不自动上报日志，只做本地落盘加手动导出；不压缩、不外传归档——0.3.0 的「轮转」只在本地按 `maxSize` 改名封存、按 `maxDays` 删旧件（见第 6.1 节），不打包、不上传，也不删当天的文件。
 
 ## 2.1 独立 Node 程序怎么接（`dsh-log/node`）
 

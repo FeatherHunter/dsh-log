@@ -106,7 +106,7 @@ await log.ready   // Node 入口的 ready：等这一下，前面每一行都已
 | 计时器、平台、默认目录 | 传宿主的 | 入口内置 |
 | 电话名与注册 | 要（客户端经电话转发） | 不用，`phoneNames` 只是派生结果，看看即可 |
 | 5 个电话（导出、清空、开关） | 界面调 | 直接用 `log.store` 上的同名方法 |
-| 开关 | 宿主持有、客户端对账 | 入口建库时自动读回上次的值 |
+| 开关 | 宿主持有、客户端对账（宿主进程里一直持有；**磁盘上那份值的读取发生在第一次 `logGetSwitch` 电话**，也就是客户端 `reconcileLogSwitch()` 那一刻——宿主单独用、又没有客户端对账时，磁盘里的开关不会被自动读回） | 入口建库时自动读回上次的值 |
 
 ## 步骤 2. 宿主侧接线（三步接入）
 
@@ -115,11 +115,12 @@ await log.ready   // Node 入口的 ready：等这一下，前面每一行都已
 ```js
 import { createHostLog, registerHostLogPhones } from 'dsh-log/host'
 
+const registry = new Map()   // 自己的电话注册表，要留着：步骤 3 的客户端桥接按名字从它取处理函数
 const hostLog = createHostLog(
   { fs, timer, getCacheDir, getPlatform, DEFAULT_CWD },
   { pluginId: 'my-plugin', prefix: 'my-plugin' }
 )
-registerHostLogPhones(new Map(), hostLog)
+registerHostLogPhones(registry, hostLog)
 ```
 
 三件事要对上：
