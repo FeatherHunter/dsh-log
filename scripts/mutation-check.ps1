@@ -324,22 +324,46 @@ export interface LogTimer {" }
      from = "if (readOk && fileName === expectedFileName && expectedFileBytes >= 0 && existingBytes !== expectedFileBytes) {"
      to   = "if (false) {" }
   # M62 追加能力被无视：明明有 appendText 也退回整篇覆写（追加路回归线必须咬住）。
+  # 锚点跟着实现走：2026-10-14 对抗审查给「是否用追加」加了「有没有被判死」这一项。
   @{ name = 'M62 追加能力被无视（退回整篇覆写）'; file = 'engine/pipeline.js'
      tests = 'append-write'; pattern = '追加路真被用上'
-     from = "const appendable = await canAppend();"
+     from = "const appendable = !appendUnusable && (await canAppend());"
      to   = "const appendable = false;" }
   # M63 追加后不累加已有尺寸：自己记的尺寸偏小 → 永远到不了封存阈值（轮转在追加路下失效）。
   # 咬点是 ⑤（多批**小**追加），不是 ③ —— ③ 一批就超阈值，尺寸记不累加也照样封存（曾把 pattern
   # 指向 ③，表里报 GREEN，靠 `-Only M63` 打印原始输出才看清是「指错了用例」而不是「断言没咬住」）。
   @{ name = 'M63 追加后不累加已有尺寸（追加路下永不封存）'; file = 'engine/pipeline.js'
      tests = 'append-write'; pattern = '尺寸是累加的'
-     from = "expectedFileBytes = Math.max(existingBytes, 0) + utf8Bytes(appended);"
-     to   = "expectedFileBytes = utf8Bytes(appended);" }
+     from = "const expectedAfter = Math.max(existingBytes, 0) + utf8Bytes(appended);"
+     to   = "const expectedAfter = utf8Bytes(appended);" }
   # M64 封存前不确认真实长度：外来写者动过文件也不再留 foreign-write（追加路绕掉跨进程判定）。
   @{ name = 'M64 封存前不确认长度（追加路绕掉跨进程判定）'; file = 'engine/pipeline.js'
      tests = 'append-write'; pattern = '封存之前会读一次确认'
      from = "if (appendable && !readOk && existingBytes > 0 && existingBytes + pendingBytes > config.maxSize) {"
      to   = "if (false) {" }
+  # M65-M67 追加能力的「首次信任」检查（2026-10-14 对抗审查补：适配器可能声明了 appendText 却什么都不做，
+  # 历史上假 rename 就这样吞掉过 12500 行）。
+  # M65 不验证「追加是否真落地」→ 撒谎适配器的那批行静默消失。
+  @{ name = 'M65 不验证追加是否落地（撒谎的 appendText 静默吃行）'; file = 'engine/pipeline.js'
+     tests = 'append-write'; pattern = '撒谎的 appendText'
+     from = "if (afterBytes >= 0 && afterBytes < expectedAfter) {"
+     to   = "if (false) {" }
+  # M66 判定无效后不抛错 → 不退回读改写，那批行就此不见。
+  @{ name = 'M66 判定追加无效却不退回读改写（那批行不见）'; file = 'engine/pipeline.js'
+     tests = 'append-write'; pattern = '撒谎的 appendText'
+     from = "throw new Error('append-not-effective');"
+     to   = "void 0;" }
+  # M67 判死之后仍继续用追加 → 坏适配器把行永远卡在重试位。
+  @{ name = 'M67 判死追加能力后仍继续追加（行永远落不了盘）'; file = 'engine/pipeline.js'
+     tests = 'append-write'; pattern = '抛错的 appendText'
+     from = "const appendable = !appendUnusable && (await canAppend());"
+     to   = "const appendable = await canAppend();" }
+  # M68 大块一次性追加（不按行边界切块）→ 两个进程各写大行时会互相插进去，落成半行 JSON
+  # （实测 20×64KB 两进程 → 2 条坏行）。
+  @{ name = 'M68 大块一次性追加（不切块，半行风险回来）'; file = 'engine/pipeline.js'
+     tests = 'append-write'; pattern = '按行边界切块追加'
+     from = "const pieces = splitForAppend(appended);"
+     to   = "const pieces = [appended];" }
 )
 
 $rows = @()

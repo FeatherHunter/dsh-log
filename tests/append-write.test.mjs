@@ -20,7 +20,7 @@ const { createHostLog, formatDailyFileName } = hostMod
 // 真磁盘文件服务 + 调用计数：writeText（整篇覆写）与 appendText（追加）分别记账。
 // withAppend=false 时删掉 appendText，用来对照「没有这个能力的宿主」走老路。
 function makeCountingFs(options = {}) {
-  const state = { writeCalls: 0, writeBytes: 0, appendCalls: 0, appendBytes: 0, readCalls: 0, writePaths: [], appendPaths: [] }
+  const state = { writeCalls: 0, writeBytes: 0, appendCalls: 0, appendBytes: 0, readCalls: 0, writePaths: [], appendPaths: [], maxAppendBytes: 0, appendedTexts: [] }
   const targetPath = (t) => (t && typeof t === 'object' && typeof t.path === 'string' ? t.path : String(t))
   const fs = {
     state,
@@ -46,7 +46,10 @@ function makeCountingFs(options = {}) {
     },
     async appendText(t, text) {
       state.appendCalls += 1
-      state.appendBytes += Buffer.byteLength(text, 'utf8')
+      const bytes = Buffer.byteLength(text, 'utf8')
+      state.appendBytes += bytes
+      state.maxAppendBytes = Math.max(state.maxAppendBytes, bytes)
+      state.appendedTexts.push(text)
       const p = targetPath(t)
       state.appendPaths.push(p)
       await mkdir(path.dirname(p), { recursive: true })
@@ -71,6 +74,19 @@ function makeCountingFs(options = {}) {
     }
   }
   if (options.withAppend === false) delete fs.appendText
+  return fs
+}
+
+// 会撒谎的适配器（⑥⑦用）：声明了 appendText 却不干实事——
+//   silent = 回一声「成功」但一个字节都不写；throw = 直接抛错。
+// 两者都是「能力清单上有、实际不可用」，引擎必须能自己发现并退回读改写，而不是以为写成了。
+function makeLyingFs(mode) {
+  const fs = makeCountingFs()
+  fs.appendText = async () => {
+    fs.state.appendCalls += 1
+    if (mode === 'throw') throw new Error('这台适配器的 appendText 是坏的')
+    return undefined
+  }
   return fs
 }
 
@@ -111,7 +127,7 @@ async function makeStore(options = {}) {
 }
 
 describe('追加写（appendText 能力）', () => {
-  it('① 追加路真被用上：首触读一次定尺寸，之后只追加，从不整篇覆写', async () => {
+  it('① 追加路真被用上：首触读一次定尺寸 + 首追加读一次验证，之后只追加，从不整篇覆写', async () => {
     const t = await makeStore()
     try {
       for (const event of ['ap.one', 'ap.two', 'ap.three']) {
@@ -121,7 +137,9 @@ describe('追加写（appendText 能力）', () => {
       assert.deepEqual((await t.rows()).map((r) => r.event), ['ap.one', 'ap.two', 'ap.three'], '行序与条数都要对')
       assert.equal(t.fs.state.writeCalls, 0, '有 appendText 时一次整篇覆写都不该发生')
       assert.equal(t.fs.state.appendCalls, 3, '每批一次追加')
-      assert.equal(t.fs.state.readCalls, 1, '只在首触读一次拿尺寸（稳态不读旧文）')
+      // 两次读：首触拿尺寸 + 首追加读回来验证「适配器真的写进去了」（对抗审查补的信任检查），
+      // 之后稳态一次都不读（只有封存之前会再读一次确认）。
+      assert.equal(t.fs.state.readCalls, 2, '首触 1 次 + 首追加验证 1 次，稳态不读旧文')
       const fileBytes = Buffer.byteLength(await readFile(t.dayFile(), 'utf8'), 'utf8')
       assert.equal(t.fs.state.appendBytes, fileBytes, '写出去的字节数 === 文件字节数（写量 O(新增)）')
     } finally {
@@ -215,6 +233,83 @@ describe('追加写（appendText 能力）', () => {
       assert.equal(t.fs.state.writeCalls, t.fs.state.writePaths.filter((x) => !x.endsWith('.log')).length, '日志文件零覆写')
       const rows = await t.allRows()
       assert.equal(rows.filter((r) => r.event === 'ap.acc').length, 30, '30 行一行不丢')
+    } finally {
+      await t.cleanup()
+    }
+  })
+
+  it('⑥ 撒谎的 appendText（返回成功却什么都不写）：那批行必须仍落盘、留 append-not-effective、此后不再依赖追加', async () => {
+    // 为什么要这一条：适配器只说「我写好了」不等于真写了。历史上假 rename 就这么吞掉过 12500 行，
+    // 所以追加路每份文件的第一次都会独立读回来确认；确认不了就判死追加能力、退回读改写补写这一批。
+    const t = await makeStore({ fs: makeLyingFs('silent') })
+    try {
+      t.store.log('error', 'lie.row', { i: 1 })
+      await t.store.synced()
+      const rows = await t.allRows()
+      assert.equal(rows.filter((r) => r.event === 'lie.row').length, 1, '撒谎的适配器不许吃掉这一行')
+      assert.equal(t.store.getDroppedCount(), 0, '不许把「没写成」算成丢弃（它还在）')
+      assert.ok(t.fs.state.writeCalls >= 1, '判定追加无效后必须退回读改写（writeText）')
+      assert.ok(
+        rows.some((r) => r.event === 'log.persist.fail' && r.fields.reason === 'append-not-effective'),
+        '要留一条 append-not-effective 诊断，别让降级静默'
+      )
+
+      // 后续批次也不再依赖追加：第二行同样要落盘，且第一行不许被重写一遍。
+      t.store.log('warn', 'lie.row2', { i: 2 })
+      await t.store.synced()
+      const rows2 = await t.allRows()
+      assert.equal(rows2.filter((r) => r.event === 'lie.row2').length, 1, '判死之后后续批次仍要落盘')
+      assert.equal(rows2.filter((r) => r.event === 'lie.row').length, 1, '已经落盘的行不许被重写一遍')
+    } finally {
+      await t.cleanup()
+    }
+  })
+
+  it('⑦ 抛错的 appendText：判死追加能力、退回读改写，行不丢、留 append-failed', async () => {
+    const t = await makeStore({ fs: makeLyingFs('throw') })
+    try {
+      t.store.log('error', 'boom.row', { i: 7 })
+      await t.store.synced()
+      const rows = await t.allRows()
+      assert.equal(rows.filter((r) => r.event === 'boom.row').length, 1, '追加抛错不许吃掉这一行')
+      assert.equal(t.store.getDroppedCount(), 0)
+      assert.ok(t.fs.state.writeCalls >= 1, '必须退回读改写')
+      assert.ok(
+        rows.some((r) => r.event === 'log.persist.fail' && r.fields.reason === 'append-failed'),
+        '要留一条 append-failed 诊断'
+      )
+    } finally {
+      await t.cleanup()
+    }
+  })
+
+  it('⑧ 大批次按行边界切块追加：单次 append 不超过原子上限（大行不会被别的写者撕成半行）', async () => {
+    // 依据：.local/probe-append-big.mjs 实测——两个真子进程各写 20 行、每行 64KB 时，
+    // 一次性大块追加会互相插进去，40 行里 2 行读不出来；按 ≤4KB 的行边界切块后 0 条坏行。
+    const t = await makeStore()
+    try {
+      for (let i = 0; i < 200; i += 1) t.store.log('warn', 'chunk.row', { i, pad: 'p'.repeat(50) })
+      await t.store.synced()
+      assert.ok(t.fs.state.appendCalls > 1, '一个十几 KB 的批次必须切成多次追加，实际 ' + t.fs.state.appendCalls + ' 次')
+      assert.ok(
+        t.fs.state.maxAppendBytes <= 4096,
+        '单次追加不得超过原子上限 4096 字节，实际 ' + t.fs.state.maxAppendBytes
+      )
+      // 每一块都必须在行边界收尾（块内容除最后一块外都以换行结束），不然就会在半行处断开。
+      for (const piece of t.fs.state.appendedTexts.slice(0, -1)) {
+        assert.ok(piece.endsWith('\n'), '切块必须落在行边界上，实际块尾：' + JSON.stringify(piece.slice(-12)))
+      }
+      const rows = await t.rows()
+      assert.equal(rows.filter((r) => r.event === 'chunk.row').length, 200, '两百行一行不丢')
+      assert.equal(t.fs.state.appendBytes, Buffer.byteLength(await readFile(t.dayFile(), 'utf8'), 'utf8'), '写量仍是 O(新增)')
+
+      // 边界：单行自己就超上限时，它自成一个块、整行写完 —— 切了必然产生半行，宁可不切。
+      const before = t.fs.state.appendCalls
+      t.store.log('warn', 'chunk.big', { pad: 'z'.repeat(5000) })
+      await t.store.synced()
+      const bigPieces = t.fs.state.appendedTexts.slice(before)
+      assert.equal(bigPieces.length, 1, '单行超上限时它自成一个块（不许从行中间断开）')
+      assert.ok(bigPieces[0].endsWith('\n'), '整行写完，只在行尾收尾')
     } finally {
       await t.cleanup()
     }

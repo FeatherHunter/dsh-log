@@ -9,8 +9,8 @@
 | 门禁 | 命令 | 当前结果 |
 | --- | --- | --- |
 | 类型 | `node node_modules/typescript/bin/tsc -p tsconfig.json` | exit 0（`.bin/tsc` 垫片坏，必须直调） |
-| 全量测试 | `npm test`（pretest 先 `node build.mjs`） | **173/173，19 套，exit 0** |
-| 变异表 | `pwsh -NoProfile -File scripts/mutation-check.ps1`（随仓提交；调单条用 `-Only M63`） | **64 条，基线先全绿、逐条 RED、0 SKIP/0 GREEN**（见第五节） |
+| 全量测试 | `npm test`（pretest 先 `node build.mjs`） | **176/176，19 套，exit 0** |
+| 变异表 | `pwsh -NoProfile -File scripts/mutation-check.ps1`（随仓提交；调单条用 `-Only M63`） | **68 条，基线先全绿、逐条 RED、0 SKIP/0 GREEN**（见第五节） |
 | 长跑自检 | `node tests/soak.mjs 0 --fast` / `node tests/soak.mjs 6` | 快速模式通过；全量见第四节 |
 | 构建可复现 | `rm -rf dist && node build.mjs` | 产物与删除前逐字节一致 |
 | 发行面 | `npm pack --dry-run` | 93 文件、44 JS + 44 个 `.d.ts`、121.0 kB（体积以当次输出为准） |
@@ -121,8 +121,28 @@
   改造后 `writeText` **0 次**、`appendText` 12 次、**累计写 65240 字节**（约 1/6.5，写量 O(全文)→O(新增)）。
 - 跨进程真机（`.local/probe-xproc-append.mjs`，两进程各 8 行、row 与 batch 两种模式）：
   **16/16 全落、0 被吃、0 撕裂行、0 条 `foreign-write`**（对照 4b 那次的 9/16）。
-- 回归线 `tests/append-write.test.mjs` 五例（真被用上 / 无能力的适配器照旧 / 追加路下轮转照旧 /
-  封存前确认不被绕掉 / 尺寸是累加的），变异 M62（无视能力）、M63（不累加尺寸）、M64（封存前不确认）。
+- 回归线 `tests/append-write.test.mjs` 八例（真被用上 / 无能力的适配器照旧 / 追加路下轮转照旧 /
+  封存前确认不被绕掉 / 尺寸是累加的 / **撒谎的适配器** / **抛错的适配器** / **按行边界切块**），
+  变异 M62（无视能力）、M63（不累加尺寸）、M64（封存前不确认）、M65（不验证追加是否落地）、
+  M66（判定无效却不退回读改写）、M67（判死后仍继续追加）、M68（大块一次性追加）。
+
+**信任检查（2026-10-14 对抗审查补的一个真缺口）**：第一版追加路是
+`await appendTarget(target, appended)` 之后就把字节数记进账——**信适配器一句「我写好了」**。
+这和当初假 `rename` 吞掉 12500 行是同一类错：适配器可以声明了能力却什么都不做/写去别处/只写一半。
+现在每份文件的**第一次**追加会独立读回来核对（长度不小于期望；用 `>=` 而不是 `==`，免得把并发写者
+误判成撒谎）：核对不过 → `appendUnusable = true` + `append-not-effective` 诊断 + 抛错；
+`appendText` 自己抛错 → `append-failed` 诊断 + 同样判死。两条路都由 `doOnce` 的既有重试**退回读改写**
+把那批行补写进去，所以代价是「丢一次优化」，不是「丢一行」。验证是按**文件名**记的（换天换文件会重新验一次），
+判死是按**实例**记的（一次失败此后一直走读改写，重启后重新验）。验证时读不回来就不下结论
+（「验不了」≠「失败」），继续按自己记的尺寸走，至少不丢行。
+
+**大块追加会撕裂（同一轮对抗审查实测出来的第二个真缺陷）**：`appendText` 走 `O_APPEND` 写，而**大块写不保证原子**。
+探针 `.local/probe-append-big.mjs`（两个真子进程、同目录同 `pluginId`、各写 20 行、每行 pad 到 64 KB）：
+40 行里 **2 行读不出来**（半行 JSON）；把行缩到 4 KB（60×2 行）则 0 条坏行。
+修法：`src/engine/io.ts` 新增 `APPEND_ATOMIC_MAX = 4096` 与 `splitForAppend(text)`——按**行边界**把批次切成
+≤4 KB 的块、一块一次追加，块与块之间只会在行与行之间交错，不会把某一行撕成两半；单行自己超过 4 KB 时整行写
+（切开必然半行，这是文档写明的边界）。修后同一探针：**40 行全落、0 条坏行**。
+回归线 ⑧（结构断言：单次追加 ≤4096、除最后一块外都以换行收尾、单行超限时整块写）+ 变异 **M68**。
 
 ### 5. 无效变异与假覆盖（方法学）
 

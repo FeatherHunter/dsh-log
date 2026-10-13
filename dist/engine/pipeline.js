@@ -7,6 +7,7 @@ import { hash8 } from '../core/ids.js';
 import { residentEventSet } from '../core/resident.js';
 import { logFileDate } from '../core/file-name.js';
 import { createLater } from '../platform/later.js';
+import { splitForAppend } from './io.js';
 export function createPipeline(input) {
     const config = input.config;
     const fs = input.fs;
@@ -125,6 +126,13 @@ export function createPipeline(input) {
     // 它只是「事后发现」：挡不住读改写窗口内的并发覆写，也猜不出被吃了几行，所以只留诊断、不谎报 dropped。
     let expectedFileName = '';
     let expectedFileBytes = -1;
+    // 追加能力的「首次信任」记录（2026-10-14 对抗审查补）：
+    // 适配器可能**声明了 appendText 却什么都不做**——信任一个只会点头的适配器，就是当初假 rename
+    // 吞掉 12500 行的同一类错。所以每份文件第一次走追加路时，独立读回来确认「这次追加的字节真的在文件里」；
+    // 确认不了（长度没涨到期望）或追加直接抛错，就把这个实例的追加能力判死（appendUnusable），
+    // 退回读改写并把这一批补写一遍——宁可丢优化，不许自欺。
+    let appendVerifiedFileName = '';
+    let appendUnusable = false;
     function notePersistFail(op, reason, dir) {
         if (!pendingPersistFail)
             pendingPersistFail = { op: op, reason: reason, dir: String(dir || '') };
@@ -680,7 +688,7 @@ export function createPipeline(input) {
             // #21：写之前先判两件事——跨天了就顺手清过期（按天保留），这份当日文件要超阈值就先封存再写新文件。
             const doOnce = async () => {
                 const target = await resolveTarget(await joinLogPath(logDir, fileName));
-                const appendable = await canAppend();
+                const appendable = !appendUnusable && (await canAppend());
                 const sizeKnown = fileName === expectedFileName && expectedFileBytes >= 0;
                 let existing = '';
                 let readOk = false;
@@ -767,9 +775,52 @@ export function createPipeline(input) {
                 if (appendable) {
                     // 追加路：不覆写旧文，只把新增行接到末尾；尺寸自己累加（封存过就从 0 起算）。
                     const appended = text + extra;
-                    await appendTarget(target, appended);
-                    expectedFileName = fileName;
-                    expectedFileBytes = Math.max(existingBytes, 0) + utf8Bytes(appended);
+                    const expectedAfter = Math.max(existingBytes, 0) + utf8Bytes(appended);
+                    // 按行边界切成 ≤ APPEND_ATOMIC_MAX 的块再逐块追加：大块 O_APPEND 写不保证原子，
+                    // 两个进程各写一大段时会互相插进去、落成半行（实测 64KB 行会有坏行，4KB 行不会）。
+                    const pieces = splitForAppend(appended);
+                    try {
+                        for (const piece of pieces)
+                            await appendTarget(target, piece);
+                    }
+                    catch (eAppend) {
+                        void eAppend;
+                        // 声明了追加却抛错：这条适配器这次不可信 → 判死追加能力，抛出去让 doOnce 的重试退回写路径。
+                        appendUnusable = true;
+                        notePersistFail('writeBatch', 'append-failed', logDir);
+                        throw eAppend;
+                    }
+                    if (appendVerifiedFileName === fileName) {
+                        expectedFileName = fileName;
+                        expectedFileBytes = expectedAfter;
+                    }
+                    else {
+                        // 每份文件的第一次追加：独立读回来确认这次追加真的进了文件。
+                        // 判据用「长度不小于期望」而不是「等于」——并发写者也追加时长度只会更大（O_APPEND 不覆写），
+                        // 用严格相等会把并发写者误判成「适配器撒谎」。
+                        let afterText = '';
+                        let afterBytes = -1;
+                        try {
+                            afterText = await readTarget(target);
+                            afterBytes = utf8Bytes(afterText);
+                        }
+                        catch (eVerify) {
+                            void eVerify;
+                            // 读不回来就不下结论（验证不了 ≠ 失败）：继续按自己记的尺寸走，至少不丢行。
+                        }
+                        if (afterBytes >= 0 && afterBytes < expectedAfter) {
+                            // 追加没生效（适配器什么都没写、写去了别处、或只写了一半）：这批行还在我们手里。
+                            // 判死追加能力并抛错 → doOnce 的重试退回读改写，把这批补写进去。绝不「自以为写了」。
+                            appendUnusable = true;
+                            appendVerifiedFileName = '';
+                            notePersistFail('writeBatch', 'append-not-effective', logDir);
+                            throw new Error('append-not-effective');
+                        }
+                        appendVerifiedFileName = fileName;
+                        expectedFileName = fileName;
+                        // 用读回来的真实长度记账（可能含别人刚追加的字节），免得记账越漂越远。
+                        expectedFileBytes = afterBytes >= 0 ? afterBytes : expectedAfter;
+                    }
                 }
                 else {
                     const payload = String(existing || '') + text + extra;

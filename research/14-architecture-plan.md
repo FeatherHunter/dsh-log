@@ -126,11 +126,14 @@ entries → engine | client | host → platform → core
 消费者工程（`strict` + `Bundler`）`tsc` 通过、`import 'dsh-log'` 与 `dsh-log/node` 都能解析到类型；
 `npm pack --dry-run` 文件清单与文档逐字一致；独立对抗审查 Go。
 
-**收尾时的实际值（2026-10-14，commit `fd4497a`）**：`npm test` **173/173（19 套）**、变异表 **64 条全 RED**
-（脚本已随仓：`scripts/mutation-check.ps1`，非 RED 即 exit 1）、`npm pack --dry-run` 93 文件（44 JS + 44 `.d.ts`、
-压缩包 121.0 kB）、实测长跑 6 分钟通过（`tests/soak.mjs 6`）、CI 三作业（`.github/workflows/ci.yml`）在
-push 后已触发（run 38458997286）。Track 3 也落地了：`appendText` 能力（写量 O(全文)→O(新增)，跨进程真机
-16/16 全落，对照改造前 9/16）+ `foreign-write` 事后可观测。
+**收尾时的实际值（2026-10-14，commit `fd4497a` 之后又补了两处对抗审查必改）**：`npm test` **176/176（19 套）**、
+变异表 **68 条全 RED**（脚本已随仓：`scripts/mutation-check.ps1`，非 RED 即 exit 1）、`npm pack --dry-run` 93 文件
+（44 JS + 44 `.d.ts`、压缩包 121.0 kB）、实测长跑 6 分钟通过（`tests/soak.mjs 6`）、CI 三作业
+（`.github/workflows/ci.yml`）在 push 后已触发并已有两个平台作业绿（ubuntu/Node 22、windows/Node 24）。
+Track 3 也落地了：`appendText` 能力（写量 O(全文)→O(新增)，跨进程真机 16/16 全落，对照改造前 9/16）
++ `foreign-write` 事后可观测；随后对抗审查又补了两条：**追加能力的首次信任检查**（撒谎/抛错的适配器
+不再静默吃行，退回读改写 + 诊断）与**按行边界切块追加**（≤4 KB，大块 O_APPEND 写会把行撕成两半，
+实测 64 KB 行有 2 条坏行、切块后 0 条）。
 
 ## 9. 可复核性与诚实边界（2026-10-14 独立审查后补）
 
