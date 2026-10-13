@@ -68,16 +68,23 @@ export function createRotation(input) {
             sealSeq.set(logDir + '|' + dayKey, idx);
             return { ok: true, sealed: sealedName };
         }
-        // 回查不到目标名，再问一句「目录里有没有多出一个原本没有的文件」：
-        // 多出来了 = 它搬到了别的名字上（适配器撒谎、改名实现有 bug），也算搬走了——清空 existing，
-        // 绝不把旧文重写一遍造成重复；一个都没多出来 = 真没搬走，降级为继续追加。
-        // 判据只认「看得见的新文件」：列不出目录时宁可当成没搬走（代价只是文件长过阈值），
-        // 绝不赌它搬走了——赌错就是整篇被覆写，那是丢数据。
+        // 回查不到目标名，再问两句：
+        //  ① 目录里有没有多出一个原本没有的文件？（多出来了 = 它搬到了别的名字上）
+        //  ② **源文件还在不在清单里？**（还在 = 那是「复制到别处但没删源」——跨卷搬运用 copy+unlink、
+        //     unlink 那步失败或漏写就会长这样，是最常见的 rename 降级实现。）
+        // 两句都成立才算搬走；只要源还在，就当没搬成、继续追加。宁可文件长过阈值，也绝不赌它搬走了——
+        // 赌错就会清空 existing 把整篇覆写掉（2026-10-14 第二轮复核实测：copy 不删源 + 异名时丢 10/40 行、
+        // dropped 仍是 0）。判据只认看得见的证据，不做任何「大概搬走了」的推测。
         if (after !== null) {
+            const srcStillThere = after.indexOf(fileName) >= 0;
             const appeared = after.filter((n) => n !== fileName && names.indexOf(n) < 0);
-            if (appeared.length > 0) {
+            if (appeared.length > 0 && !srcStillThere) {
                 sealSeq.set(logDir + '|' + dayKey, idx);
-                return { ok: true, sealed: appeared[0] };
+                // 一次多出多个新文件时，优先挑「像这份文件的封存件」的那个（同基名 + 点号），
+                // 挑不到才退回第一个——记错名字只影响 audit/info 行文本，不影响「已搬走」这个判定。
+                const base = fileName.replace(/\.log$/, '');
+                const movedTo = appeared.filter((n) => n.indexOf(base + '.') === 0)[0] || appeared[0];
+                return { ok: true, sealed: movedTo };
             }
         }
         return { ok: false, reason: 'rename-not-effective' };

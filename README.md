@@ -229,8 +229,8 @@ clientLog.log('info', 'my.event', { step: 'started' })   // info 需开关打开
   - `no-listdir`——适配器没提供 `listDir`（列不出目录就无法在改名后验证，所以**根本不改名**）。这是能力协商的第一道闸：rename 是不可逆副作用，验不了就别做；
   - `no-rename`——适配器没提供 `rename`；
   - `rename-threw`——rename 抛错；
-  - `rename-not-effective`——rename 没抛错，但回查目录时目标名不在、且目录里**也没有多出任何原本没有的文件**（空实现、返回 undefined、忘了 await 自己的异步改名都算）。
-  四种情况都继续追加、一行不丢。两条判据的理由：**先看能不能验证再动手**——否则文件被真搬走却报「没封成」，调用方会把旧文整篇写回当日文件，每一行在磁盘上出现两份（而 `dropped` 仍是 0）；**改名后一定要回查目录**——rename 只代表「调用方说它成功了」，不代表文件真搬走了，照单全收会让下一次写盘把整篇覆盖成新行，此前所有行静默消失（2026-10-14 的 20k 行风暴实测丢了 12500 行而 `dropped` 仍是 0）。反过来，若回查时目录里**多出了一个原本没有的文件**，就说明它搬到了别的名字上——这也算搬走（清空内存里的旧文，绝不重写一遍造成重复），`log.rotate.seal` 行里 `sealed` 记实际出现的新名字。
+  - `rename-not-effective`——rename 没抛错，但回查目录时目标名不在、且**源文件还在清单里**（空实现、返回 undefined、忘了 await 自己的异步改名、「复制到别处但没删源」都算）。
+  四种情况都继续追加、一行不丢。两条判据的理由：**先看能不能验证再动手**——否则文件被真搬走却报「没封成」，调用方会把旧文整篇写回当日文件，每一行在磁盘上出现两份（而 `dropped` 仍是 0）；**改名后一定要回查目录**——rename 只代表「调用方说它成功了」，不代表文件真搬走了，照单全收会让下一次写盘把整篇覆盖成新行，此前所有行静默消失（2026-10-14 的 20k 行风暴实测丢了 12500 行而 `dropped` 仍是 0）。反过来，若回查时目录里**多出了一个原本没有的文件、同时源文件已经不在清单里**，就说明它搬到了别的名字上——这也算搬走（清空内存里的旧文，绝不重写一遍造成重复），`log.rotate.seal` 行里 `sealed` 记实际出现的新名字。**两个条件缺一不可**：只多出新文件而源文件还在，那是「复制到别处但没删源」（跨卷搬运用 copy+unlink、unlink 失败或漏写就长这样），不算搬走——否则会把整篇覆写掉（第二轮复核实测丢 10/40 行、`dropped` 仍是 0）。
 - **保留按天**：每次写盘前顺手清过期——日期早于「今天往前 `maxDays - 1` 天」的 `.log` 删掉；当日可写文件、开关文件、`audit.json` 永不删。清理记 `audit.json` 一条 `retain.evict`（带 `removed` 列表与 `keptDays`），并落一行 info 自监控 `log.retain.evict`。
 - **单批自己就超阈值**：这批的字节数本身就大于 `maxSize` 时无法封存（没有旧文可封），照常写入并落一行 info 自监控 `log.rotate.oversize`（带 `file`/`bytes`/`maxSize`）——不静默。
 - **审计**：日志目录里的 `audit.json` 逐条记账（`rotate.seal`、`retain.evict`），一行一条 JSON。
@@ -298,7 +298,7 @@ node tests/update-snapshots.mjs       # 清单新增字段后：先把黄转绿�
 
 快照门禁只有黄/红两档（#18 Q6）：黄 warn——清单新增字段但快照未更新（`tests/snapshot.test.mjs` 只警告不判红，跑 `node tests/update-snapshots.mjs` 一键更新即转绿，不阻排障）；红 error——未知事件名、envelope 非法（落盘行五键 `{v,ts,level,event,fields}` 中 `v` 不为 3 或形状不对）、事件总数突变（与 `tests/event-snapshots/_baseline.json` 比 ±超 5 且 `tests/event-snapshots/CHANGELOG.md` 无说明；红的是“无 changelog”不是字段本身，补说明后跑更新命令即转绿）。事件条数就记在 `tests/event-snapshots/` 这套快照里，别在文档里抄数字。
 
-`npm test` 的用例清单来自 `package.json` 的 `test` 脚本（上面那十八个文件、共 **165 例**；`pretest` 会先跑 `node build.mjs`，所以测试一定在最新产物上跑）。类型检查：`npm run typecheck`（脚本内已直调 `node node_modules/typescript/bin/tsc`，绕开仓库里那个指向失效路径的 `.bin/tsc` 垫片）。发行面那两套（`release-surface`、`consumer-types`）会把包按 junction 装进临时工程、用真 tsc 编译一次，所以「类型能不能被消费者用上」是门禁里跑出来的结论，不是文档里的承诺。
+`npm test` 的用例清单来自 `package.json` 的 `test` 脚本（上面那十八个文件、共 **166 例**；`pretest` 会先跑 `node build.mjs`，所以测试一定在最新产物上跑）。类型检查：`npm run typecheck`（脚本内已直调 `node node_modules/typescript/bin/tsc`，绕开仓库里那个指向失效路径的 `.bin/tsc` 垫片）。发行面那两套（`release-surface`、`consumer-types`）会把包按 junction 装进临时工程、用真 tsc 编译一次，所以「类型能不能被消费者用上」是门禁里跑出来的结论，不是文档里的承诺。
 
 ### 9.1 源码分层（贡献者视角）
 

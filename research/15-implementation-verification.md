@@ -9,8 +9,8 @@
 | 门禁 | 命令 | 当前结果 |
 | --- | --- | --- |
 | 类型 | `node node_modules/typescript/bin/tsc -p tsconfig.json` | exit 0（`.bin/tsc` 垫片坏，必须直调） |
-| 全量测试 | `npm test`（pretest 先 `node build.mjs`） | **165/165，17 套，exit 0** |
-| 变异表 | `pwsh -NoProfile -File .local/mutation-check.ps1` | 59 条，基线先全绿、逐条必须 RED（见第五节） |
+| 全量测试 | `npm test`（pretest 先 `node build.mjs`） | **166/166，17 套，exit 0** |
+| 变异表 | `pwsh -NoProfile -File .local/mutation-check.ps1` | 60 条，基线先全绿、逐条必须 RED（见第五节） |
 | 长跑自检 | `node tests/soak.mjs 0 --fast` / `node tests/soak.mjs 6` | 快速模式通过；全量见第四节 |
 | 构建可复现 | `rm -rf dist && node build.mjs` | 产物与删除前逐字节一致 |
 | 发行面 | `npm pack --dry-run` | 93 文件、44 个 `.d.ts`、114.8 kB |
@@ -48,8 +48,23 @@
   B1f（rename 搬到 `.9.log`：算搬走、旧文不重写、一行不变两份）。变异 M58/M59 分别咬住这两条。
 - **教训**：**不可逆副作用之前先确认「做完之后验不验得了」**；顺序错了，验证再严也救不回来。
 
+### 1b2. 修 N1 时又开了一个口子：只看「多出新文件」不够，还要看「源文件走没走」（第二轮复核 N2）
+- **怎么咬出来的**：第二轮只读复核者 a3d10536 造了「`rename` = 复制到别的名字、**不删源**」的适配器
+  ——跨卷搬运用 copy+unlink、unlink 那步失败或漏写就长这样，是最常见的 rename 降级实现。
+- **机制**：N1 的修法里那句「目录里多出一个原本没有的文件就算搬走」被这个形态骗过：
+  目标名不在、但确实多出了文件 → 判「已搬走」→ 清空 `existing` → 下一轮把整篇覆写成新行 →
+  **旧行静默消失、`dropped` 仍是 0**。复核者实测 4 轮 × 10 事件：`writtenUnique=40, distinctOnDisk=30, LOST=10`，
+  同一份文件里还同时出现「已封存」与 `rename-not-effective` 两种自相矛盾的记录。
+- **修复**：判据加第二个必要条件——**源文件必须已从清单里消失**：
+  `if (appeared.length > 0 && !srcStillThere)`。只多出新文件而源还在 ⇒ 不算搬走，降级继续追加
+  （宁可文件长过阈值，也绝不赌它搬走了）。顺带把 `sealed` 记的名字改成「优先挑同基名的新文件」，
+  一次多出多个文件时不再记错名字。
+- **回归线**：B1g（复制异名不删源：50 行一行不丢、`reason === 'rename-not-effective'`）；
+  变异 M60（去掉 `!srcStillThere` 守卫 → B1g RED）。
+- **教训**：「多了一个新文件」是**间接证据**，不能单独作为「旧文已搬走」的依据；直接证据是「源文件不在了」。
+
 ### 1c. `sealSeq` 本地序号是冗余（独立审查的覆盖缺口，保留但写清理由）
-- 删掉 `sealSeq.set(...)` 那一行，全量 165 例仍全绿：封存前先列目录、封存后回查目录，
+- 删掉 `sealSeq.set(...)` 那一行，全量 166 例仍全绿：封存前先列目录、封存后回查目录，
   序号从清单里就数得到，本地计数在当前可达路径上是**行为惰性**的。
 - 不删的理由写进 `src/core/retention.ts` 的注释：它是为「将来有人引入带缓存/最终一致的 `listDir`、
   或回查被削弱」留的命——那时序号会重复，而 `fs.rename` 是替换语义，同名封存件会被静默覆盖。

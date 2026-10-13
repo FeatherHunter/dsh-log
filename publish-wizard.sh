@@ -258,35 +258,53 @@ pause "账号没问题就按回车"
 stage "升版本号"
 say "新版本号按 README 第 10 节的版本策略定：只改文档或修缺陷动补丁位，加能力动次版本位，破坏性变更才动更早的位。"
 NEXT_PATCH=$(printf '%s' "$CUR_VERSION" | awk -F. '{ if (NF == 3) printf "%d.%d.%d", $1, $2, $3 + 1; else print $0 }')
-ask PUBLISH_VERSION "要发布的版本号（直接回车用 $NEXT_PATCH）：" 
-PUBLISH_VERSION=${PUBLISH_VERSION:-$NEXT_PATCH}
+# 当前版本还没发到官方源时（404），直接发当前版本是合法的默认选项——
+# 本仓 0.3.0 就是这种情况：版本号在准备阶段已经升好，不该再被逼着换号。
+if npm view "$PKG_NAME@$CUR_VERSION" version --registry="$REGISTRY" >/dev/null 2>&1; then
+  CUR_PUBLISHED=1
+  say "官方源上已有 $PKG_NAME@$CUR_VERSION，这次要发一个新号（补丁位 +1 = $NEXT_PATCH）。"
+else
+  CUR_PUBLISHED=0
+  say "官方源上还没有 $PKG_NAME@$CUR_VERSION（404）：可以直接发当前版本，也可以改成别的号。"
+fi
+if [[ "$CUR_PUBLISHED" == "0" ]]; then
+  ask PUBLISH_VERSION "要发布的版本号（直接回车用当前版本 $CUR_VERSION）："
+  PUBLISH_VERSION=${PUBLISH_VERSION:-$CUR_VERSION}
+else
+  ask PUBLISH_VERSION "要发布的版本号（直接回车用 $NEXT_PATCH）："
+  PUBLISH_VERSION=${PUBLISH_VERSION:-$NEXT_PATCH}
+fi
 if [[ ! "$PUBLISH_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   warn "版本号要写成 X.Y.Z 三段数字（收到：$PUBLISH_VERSION）"
   exit 1
 fi
-if [[ "$PUBLISH_VERSION" == "$CUR_VERSION" ]]; then
-  warn "版本号跟当前一样（还是 $CUR_VERSION）：换一个新号再跑"
+if [[ "$PUBLISH_VERSION" == "$CUR_VERSION" && "$CUR_PUBLISHED" == "1" ]]; then
+  warn "版本号跟当前一样（还是 $CUR_VERSION），而它已经发过了：换一个新号再跑"
   exit 1
 fi
 if npm view "$PKG_NAME@$PUBLISH_VERSION" version --registry="$REGISTRY" >/dev/null 2>&1; then
   warn "官方源上已经有 $PKG_NAME@$PUBLISH_VERSION：发过的号不能再发，换一个新号"
   exit 1
 fi
-say "将把 $CUR_VERSION 改成 $PUBLISH_VERSION（包清单与 README 各一处）。"
-if ! confirm "确认升版本？"; then
-  warn "已取消，什么都没改"
-  exit 1
-fi
-(cd "$PKG_DIR" && node -e "
+if [[ "$PUBLISH_VERSION" == "$CUR_VERSION" ]]; then
+  say "版本号不变（$CUR_VERSION）——它还没发过，本次就是它的首发，跳过改号。"
+else
+  say "将把 $CUR_VERSION 改成 $PUBLISH_VERSION（包清单与 README 各一处）。"
+  if ! confirm "确认升版本？"; then
+    warn "已取消，什么都没改"
+    exit 1
+  fi
+  (cd "$PKG_DIR" && node -e "
 const fs = require('fs')
 const p = 'package.json'
 const j = JSON.parse(fs.readFileSync(p, 'utf8'))
 j.version = process.argv[1]
 fs.writeFileSync(p, JSON.stringify(j, null, 2) + '\n')
 " "$PUBLISH_VERSION")
-if grep -q '当前版本 `'"$CUR_VERSION"'`' "$PKG_DIR/README.md"; then
-  sed "s/当前版本 \`$CUR_VERSION\`/当前版本 \`$PUBLISH_VERSION\`/" "$PKG_DIR/README.md" > "$PKG_DIR/README.md.tmp"
-  mv "$PKG_DIR/README.md.tmp" "$PKG_DIR/README.md"
+  if grep -q '当前版本 `'"$CUR_VERSION"'`' "$PKG_DIR/README.md"; then
+    sed "s/当前版本 \`$CUR_VERSION\`/当前版本 \`$PUBLISH_VERSION\`/" "$PKG_DIR/README.md" > "$PKG_DIR/README.md.tmp"
+    mv "$PKG_DIR/README.md.tmp" "$PKG_DIR/README.md"
+  fi
 fi
 NEW_VERSION=$(_pkg_field version)
 printf '  %s✓ 包清单版本：%s%s\n' "$GREEN" "$NEW_VERSION" "$RESET"
@@ -300,9 +318,11 @@ node "$PKG_DIR/build.mjs"
 say "编译产物："
 ls -1 "$PKG_DIR/dist"
 [[ -f "$PKG_DIR/dist/node.js" ]] || { warn "dist/node.js 没生成，先解决构建问题"; exit 1; }
-say "干跑打包清单（重点看有没有 dist/node.js，以及共几个文件）："
+[[ -f "$PKG_DIR/dist/node.d.ts" ]] || { warn "dist/node.d.ts 没生成（声明由 tsc 产出）：先解决构建问题"; exit 1; }
+say "干跑打包清单（重点看有没有 dist/node.js 与 dist/**/*.d.ts，以及共几个文件）："
 (cd "$PKG_DIR" && npm publish --dry-run --registry="$REGISTRY" 2>&1 | sed -n '1,40p') || true
-note "清单里应含 dist/node.js、共 11 个文件、发布目标为官方源。"
+note "清单里应含 dist/node.js、dist 下每个 .js 都配一个 .d.ts（0.3.0 是 44 + 44）、发布目标为官方源。"
+note "文件数以干跑输出的 total files 为准（0.3.0 是 93 个）；数字变了就同步改 README §9。"
 pause "看清楚了按回车"
 
 # ── 第五段：真正发布 ─────────────────────────────────────────────────────
@@ -338,10 +358,11 @@ console.log('从官方源装包后，入口可用：', typeof createNodeHostLog 
 " )
 rm -rf "$PROBE"
 if [[ -f "$PKG_DIR/$DRILL_FILE" ]]; then
-  if grep -q '包名：dsh-log' "$PKG_DIR/$DRILL_FILE" 2>/dev/null; then
-    sed "s/  - 版本：0\.1\.0/  - 版本：$NEW_VERSION/" "$PKG_DIR/$DRILL_FILE" > "$PKG_DIR/$DRILL_FILE.tmp"
-    mv "$PKG_DIR/$DRILL_FILE.tmp" "$PKG_DIR/$DRILL_FILE"
-    say "发布演练记录里的版本号已同步为 $NEW_VERSION"
+  say "发布演练记录：$DRILL_FILE 里应有一段对应 $NEW_VERSION 的记录（版本号、发布人、发布修订 gitHead、"
+  say "文件数与体积、官方源 shasum/integrity、四项核对结果）。这次发布若还没有那一段，请把 npm publish 的"
+  say "原始输出与关键行补进去——它是下一个人复现和核对的唯一凭据（0.2.0 就是漏了包内文档核对才发的旧稿）。"
+  if ! grep -q "dsh-log $NEW_VERSION" "$PKG_DIR/$DRILL_FILE" 2>/dev/null; then
+    warn "记录里还没有 $NEW_VERSION 这一节，记得补（发布后四项核对做完再写结论）"
   fi
 fi
 say "还差一步（发布真实证据刚拿到）：把 npm publish 的原始输出补进 $DRILL_FILE 的引用块里。"

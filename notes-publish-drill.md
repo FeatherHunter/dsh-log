@@ -2,6 +2,51 @@
 
 这份文件记的是「发出去的是什么」：每发一版，把原始输出与关键数字留在下面，供下一个人复现和核对。文中的字节数、文件数都描述**当时发出去的那一份**，不是当前工作区。0.2.0 是首次公开发布，随 Node 程序入口一起上线；此前只有本地演练（见第四节）。
 
+## 〇、待发布：dsh-log 0.3.0（破坏性版本，只发一次）
+
+**状态（2026-10-14）：代码与文档已就绪、门禁全绿，等一次交互式登录后发布。** 本机 `npm whoami` 报 `ENEEDAUTH`，
+而 npm 官方源发布会要求浏览器授权/动态码（0.2.1 那次后台直跑报 `EOTP`、什么都没发出去），所以这一步必须由人在**交互终端**里做。
+
+发布前最后核对（发布那一刻再跑一遍，全部要过）：
+
+| 项 | 命令 | 期望 |
+| --- | --- | --- |
+| 类型 | `node node_modules/typescript/bin/tsc -p tsconfig.json` | exit 0（`.bin/tsc` 垫片是坏的，别用 `npm run typecheck` 之外的垫片路径） |
+| 全量测试 | `npm test` | 165/165、17 套、exit 0 |
+| 变异表 | `pwsh -NoProfile -File .local/mutation-check.ps1` | 基线全绿、59 条逐条 RED、0 SKIP/GREEN |
+| 长跑自检 | `node tests/soak.mjs 6` | A 段 20000/20000、B 段查询行数 === 磁盘行数 |
+| 构建可复现 | `rm -rf dist && node build.mjs` | 产物与删除前逐字节一致（44 JS + 44 `.d.ts`） |
+| 打包干跑 | `npm publish --dry-run` | 93 文件、压缩约 115 kB、解包约 358 kB |
+
+一键走完六段（体检 → 网页登录 → 版本号 → 构建与干跑 → 真发布 → 发布后验证），在**包根**用 Git Bash 跑：
+
+```bash
+"C:\Program Files\Git\bin\bash.exe" publish-wizard.sh
+```
+
+向导已按 0.3.0 的现状改过：当前版本（0.3.0）还没发过官方源，**直接回车就发当前版本**，不会再逼你换号；
+第四段会同时检查 `dist/node.js` 与 `dist/node.d.ts`（声明由 tsc 产出）。
+
+发布后必须补的四项核对（照第三节清单做）：
+
+1. 官方源：`npm view dsh-log version` = 0.3.0、`dist-tags.latest` = 0.3.0（同步有约 1 分钟延迟）。
+2. 发布修订：`npm view dsh-log@0.3.0 gitHead` 等于发布那一刻的仓库 HEAD（复核时用 `git merge-base --is-ancestor <sha> HEAD`，不要直接比当天 HEAD）。
+3. 包内文档与仓库逐字一致：下载 tarball 解开，包内 `README.md` / `INTEGRATION.md` 的 SHA256 与仓库同名文件相同（0.2.0 就是漏了这步发了旧稿）。
+4. 陌生机器装一次：空目录 `npm install dsh-log@0.3.0`，`import { createQuickLog } from 'dsh-log'` 能建库写出五键行；再跑一次 `tsc --strict`（`types: []`、不装 `@types/node`）确认四个入口都有类型。
+
+发布这一版的已知边界（要写进发布说明，别让使用者自己踩）：
+
+- **破坏性变更**：不兼容 0.2.x。插件按 `INTEGRATION.md` 的迁移七步重开发；`0.2.x` 的 `sampleRate` 参数已删（它从未参与任何判定），`setLogSwitch` 现在只收一个布尔参。
+- **跨进程零保护**：同目录多实例的占用登记是模块副本级的，跨进程不设防；文档已写成风险提示。
+- **不发 `.d.ts` 之外的东西**：包内不含 `src`、不含测试；`dist` 是入库产物。
+- 已发布版本里 **0.3.0 是首次带类型的版本**（0.2.x 装到 TS 工程里会报 TS7016）。
+
+下面这段留空，等发布时把 `npm publish` 的原始输出粘进来（与 0.2.0/0.2.1 两节同口径）：
+
+```text
+（发布后粘贴）
+```
+
 ## 一、已发布：dsh-log 0.2.1
 
 - 发布时间：2026-09-12 04:04:23（UTC）

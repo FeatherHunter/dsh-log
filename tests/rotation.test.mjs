@@ -364,6 +364,79 @@ describe('#21 轮转与保留', () => {
     }
   })
 
+  // B1g（2026-10-14 第二轮复核 N2）：适配器的 rename 是**复制到别处但没删源**（跨卷搬运用 copy+unlink，
+  // unlink 那步失败或漏写就长这样——最常见的 rename 降级实现），且复制到的名字≠请求的封存名。
+  // 只看「目录里多了个新文件」就判「已搬走」会清空 existing，把整篇覆写掉（复核实测丢 10/40 行、dropped=0）。
+  // 判据必须再加一句「源文件确实不在清单里了」；源还在就当没搬成、继续追加（宁可文件长过阈值）。
+  it('B1g 复制到异名但没删源：不许当成搬走（reason=rename-not-effective）', async () => {
+    const hostMod = await load('host.js')
+    const cacheDir = await makeCacheDir()
+    const dir = path.join(cacheDir, 'logs-copykeep')
+    try {
+      const fsCopyKeep = {
+        resolve: async (p) => ({ path: String(p) }),
+        async readText(t) {
+          try {
+            return await readFile(String(t.path ?? t), 'utf8')
+          } catch (e) {
+            void e
+            return ''
+          }
+        },
+        async writeText(t, text) {
+          const p = String(t.path ?? t)
+          await mkdir(path.dirname(p), { recursive: true })
+          await writeFile(p, String(text), 'utf8')
+        },
+        async mkdir(d) {
+          await mkdir(String(d), { recursive: true })
+        },
+        async unlink(t) {
+          try {
+            await unlink(String(t.path ?? t))
+          } catch (e) {
+            void e
+          }
+        },
+        async listDir(t) {
+          return names(String(t.path ?? t))
+        },
+        // 复制到「别的名字」（.9.log）但**不删源**——不是真搬走。
+        async rename(from, to) {
+          const a = String(from.path ?? from)
+          const b = String(to.path ?? to).replace(/\.1\.log$/, '.9.log')
+          await mkdir(path.dirname(b), { recursive: true })
+          await writeFile(b, await readFile(a, 'utf8'), 'utf8')
+        }
+      }
+      const log = hostMod.createHostLog(
+        {
+          fs: fsCopyKeep,
+          timer: realTimer(),
+          getCacheDir: async () => cacheDir,
+          getPlatform: async () => null,
+          DEFAULT_CWD: cacheDir
+        },
+        { pluginId: 'copykeep', prefix: 'copykeep', maxSize: 400 }
+      )
+      for (let r = 0; r < 5; r += 1) {
+        for (let i = 0; i < 10; i += 1) log.store.log('warn', 'ck.row', { r, i })
+        await log.store.synced()
+      }
+      const rows = await readAllRows(dir)
+      const mine = rows.filter((r) => r.event === 'ck.row')
+      const uniq = new Set(mine.map((r) => JSON.stringify(r.fields)))
+      assert.equal(uniq.size, 50, '一行都不许丢（复制没删源 ⇒ 绝不当成搬走）')
+      const degRows = rows.filter((r) => r.event === 'log.rotate.degraded')
+      assert.ok(degRows.length >= 1, '降级要留一行 info 自监控')
+      assert.equal(degRows[0].fields.reason, 'rename-not-effective')
+      assert.equal(log.store.getDroppedCount(), 0)
+      log.store.release()
+    } finally {
+      await rm(cacheDir, { recursive: true, force: true })
+    }
+  })
+
   it('B2 保留按天不按文件数：早于 maxDays 的清掉、近的与当日封存件都留着，audit 记账', async () => {
     const mod = await load('node.js')
     const cacheDir = await makeCacheDir()
