@@ -38,7 +38,11 @@ export function selectExpiredFiles(config, names, currentFileName, cutoffDay) {
     return expired;
 }
 // 下一个封存序号：目录里已有最大序号与本实例本地计数取大 + 1。
-// 本地计数是必要的：本实例刚封存出来的文件，另一个实例可能还没在目录清单里看到。
+// 本地计数（调用方传进来的 `sealSeq`）是**冗余防线**，不是当前可达路径的必需品：
+// 封存前先列目录、封存后回查目录，序号从清单里就数得到（2026-10-14 独立审查实测：删掉本地计数那一行，
+// 全量 163 例仍全绿——行为惰性）。留着它的理由是**为将来的弱化留一条命**：一旦有人引入带缓存或
+// 最终一致的 `listDir`、或哪天回查被削弱，序号就会重复，而 rename 是**替换语义**——
+// 同名封存件会被静默覆盖。真到那天，这条本地计数就是唯一还数得准的东西。
 export function nextSealIndex(config, names, fileName, localSeq) {
     const base = fileName.replace(/\.log$/, '');
     let max = 0;

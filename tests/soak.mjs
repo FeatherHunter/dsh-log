@@ -95,15 +95,23 @@ async function storm() {
 }
 
 // ── 工具：沿游标翻页取全部可见行 ─────────────────────────────
+// 页数上限按「长跑最大写入量」留足：6 分钟约写 2.4 万行，limit=100 需要 ~250 页。
+// 上限用尽必须**明确失败**，不能静默当成「读侧就这么多」——否则会把「翻页没翻完」误报成接缝破裂
+// （2026-10-14 首跑就踩了：上限 200 页 × 100 = 2 万行，比磁盘少 4407 行，报了个假缺陷）。
+const MAX_PAGES = 2000
 async function queryAllRows(store, pluginId) {
   const rows = []
   let cursor = null
-  for (let page = 0; page < 200; page += 1) {
+  let pages = 0
+  for (; pages < MAX_PAGES; pages += 1) {
     const res = await store.handleLogQuery(cursor ? { pluginId, page: { limit: 100, cursor } } : { pluginId, page: { limit: 100 } })
     const entries = Array.isArray(res.entries) ? res.entries : []
     rows.push(...entries)
     cursor = res.nextCursor || null
     if (!cursor) break
+  }
+  if (pages >= MAX_PAGES && cursor) {
+    fail(`翻页上限用尽（${MAX_PAGES} 页）仍未读完：这不是接缝问题，是自检工具的页数上限要调大`)
   }
   return rows
 }

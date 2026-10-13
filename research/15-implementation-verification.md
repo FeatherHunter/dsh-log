@@ -9,8 +9,8 @@
 | 门禁 | 命令 | 当前结果 |
 | --- | --- | --- |
 | 类型 | `node node_modules/typescript/bin/tsc -p tsconfig.json` | exit 0（`.bin/tsc` 垫片坏，必须直调） |
-| 全量测试 | `npm test`（pretest 先 `node build.mjs`） | **163/163，17 套，exit 0** |
-| 变异表 | `pwsh -NoProfile -File .local/mutation-check.ps1` | 57 条，基线先全绿、逐条必须 RED（见第五节） |
+| 全量测试 | `npm test`（pretest 先 `node build.mjs`） | **165/165，17 套，exit 0** |
+| 变异表 | `pwsh -NoProfile -File .local/mutation-check.ps1` | 59 条，基线先全绿、逐条必须 RED（见第五节） |
 | 长跑自检 | `node tests/soak.mjs 0 --fast` / `node tests/soak.mjs 6` | 快速模式通过；全量见第四节 |
 | 构建可复现 | `rm -rf dist && node build.mjs` | 产物与删除前逐字节一致 |
 | 发行面 | `npm pack --dry-run` | 93 文件、44 个 `.d.ts`、114.8 kB |
@@ -29,11 +29,30 @@
 - **机制**：封存时 `rename` 被调用 → 不抛错、文件没搬走 → 库以为旧文已搬走，把内存里的
   `existing` 清空 → 下一次写盘只写新行、整篇覆盖 → 此前所有行消失，且计数面无任何异常。
 - **修复**（`src/engine/rotation.ts`）：封存后**回查目录**——目标名不在目录里就当这次封存没发生，
-  返回 `{ ok: false, reason: 'rename-not-effective' }`，降级为继续追加。`reason` 三态：
-  `no-rename` / `rename-threw` / `rename-not-effective`（README §6.1 已写明）。
+  返回 `{ ok: false, reason: 'rename-not-effective' }`，降级为继续追加。
 - **回归线**：`tests/rotation.test.mjs` 的 B1d（假适配器下 50 行一行不丢、无封存件、`dropped` 0、
   `reason === 'rename-not-effective'`）；B1b 断言 `reason === 'no-rename'`。
 - **教训**：能力协商不能只看「方法在不在」，还要看「它做完之后世界变了没有」。
+
+### 1b. 能力检查顺序反了 → 一行变两份（独立审查 N1）
+- **怎么咬出来的**：2026-10-14 独立审查者 9506a4a0 按「`src/platform/ports.ts` 能力全可选、
+  INTEGRATION.md 明文允许省略 `listDir`」这一条接入形态造适配器：**给了 rename、没给 listDir**。
+- **机制**：旧实现先 rename（文件被真搬走）再回查——回查列不出目录 → 报「没封成」→
+  调用方保留 `existing` 把旧文整篇写回当日文件 → **每一行在磁盘上出现两份**（当日文件 + 封存件），
+  而 `dropped` 仍是 0、`ready` 仍报 ok。审查者的最小复现：60 个唯一事件在磁盘上变 121 行。
+- **修复**：**列不出目录就根本不动手**（新增 `reason: 'no-listdir'`）；另外回查不到目标名时，
+  再看「目录里有没有多出一个原本没有的文件」——多出来了就是搬到了别的名字上，也算搬走
+  （清空 `existing`，绝不重写旧文造成重复）。判据只认「看得见的新文件」：列不出目录宁可当成没搬走
+  （代价只是文件长过阈值），绝不赌它搬走了——赌错就是整篇被覆写。
+- **回归线**：B1e（有 rename 无 listDir：不封存、50 行一行不丢、一行不变两份、`reason === 'no-listdir'`）；
+  B1f（rename 搬到 `.9.log`：算搬走、旧文不重写、一行不变两份）。变异 M58/M59 分别咬住这两条。
+- **教训**：**不可逆副作用之前先确认「做完之后验不验得了」**；顺序错了，验证再严也救不回来。
+
+### 1c. `sealSeq` 本地序号是冗余（独立审查的覆盖缺口，保留但写清理由）
+- 删掉 `sealSeq.set(...)` 那一行，全量 165 例仍全绿：封存前先列目录、封存后回查目录，
+  序号从清单里就数得到，本地计数在当前可达路径上是**行为惰性**的。
+- 不删的理由写进 `src/core/retention.ts` 的注释：它是为「将来有人引入带缓存/最终一致的 `listDir`、
+  或回查被削弱」留的命——那时序号会重复，而 `fs.rename` 是替换语义，同名封存件会被静默覆盖。
 
 ### 2. `ready` 是急切 Promise → 报「已落定」时行还在队列里
 - `ready` 原为建库时创建一次的 Promise：建库后写入的行不在它的刷盘范围里，`await log.ready` 会立刻返回

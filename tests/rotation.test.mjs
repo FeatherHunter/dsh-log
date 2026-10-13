@@ -10,7 +10,7 @@
 // 跑 dist（与其余测试同口径）：真临时目录 + 真磁盘写入，断言看落盘文件。
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, readFile, readdir, rm, unlink, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, readdir, rename, rm, unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { pathToFileURL, fileURLToPath } from 'node:url'
@@ -214,6 +214,149 @@ describe('#21 轮转与保留', () => {
       const degRows = rows.filter((r) => r.event === 'log.rotate.degraded')
       assert.ok(degRows.length >= 1, '降级要留一行 info 自监控')
       assert.equal(degRows[0].fields.reason, 'rename-not-effective', '原因要如实：改名没生效')
+      assert.equal(log.store.getDroppedCount(), 0)
+      log.store.release()
+    } finally {
+      await rm(cacheDir, { recursive: true, force: true })
+    }
+  })
+
+  // B1e（2026-10-14 独立审查 N1）：适配器给了 rename 却**没有 listDir**——这是 INTEGRATION 明文许可的
+  // 接入形态（「列目录缺了按空目录处理」）。旧实现先 rename 再判能不能验证：文件被真搬走、回查却列不出
+  // 目录 → 报「没封成」→ 调用方把旧文整篇写回当日文件 → **每一行在磁盘上两份**，而 dropped 仍是 0。
+  // 现在：列不出目录就根本不动手。
+  it('B1e 有 rename 但没 listDir：不许动手封存、更不许一行变两份（reason=no-listdir）', async () => {
+    const hostMod = await load('host.js')
+    const cacheDir = await makeCacheDir()
+    const dir = path.join(cacheDir, 'logs-nolist')
+    try {
+      const fsNoList = {
+        resolve: async (p) => ({ path: String(p) }),
+        async readText(t) {
+          try {
+            return await readFile(String(t.path ?? t), 'utf8')
+          } catch (e) {
+            void e
+            return ''
+          }
+        },
+        async writeText(t, text) {
+          const p = String(t.path ?? t)
+          await mkdir(path.dirname(p), { recursive: true })
+          await writeFile(p, String(text), 'utf8')
+        },
+        async mkdir(d) {
+          await mkdir(String(d), { recursive: true })
+        },
+        async unlink(t) {
+          try {
+            await unlink(String(t.path ?? t))
+          } catch (e) {
+            void e
+          }
+        },
+        // 故意不提供 listDir；rename 是真会搬走文件的实现（最危险的组合）。
+        async rename(from, to) {
+          const a = String(from.path ?? from)
+          const b = String(to.path ?? to)
+          await mkdir(path.dirname(b), { recursive: true })
+          await rename(a, b)
+        }
+      }
+      const log = hostMod.createHostLog(
+        {
+          fs: fsNoList,
+          timer: realTimer(),
+          getCacheDir: async () => cacheDir,
+          getPlatform: async () => null,
+          DEFAULT_CWD: cacheDir
+        },
+        { pluginId: 'nolist', prefix: 'nolist', maxSize: 400 }
+      )
+      for (let r = 0; r < 5; r += 1) {
+        for (let i = 0; i < 10; i += 1) log.store.log('warn', 'nolist.row', { r, i })
+        await log.store.synced()
+      }
+      const files = await names(dir)
+      assert.equal(files.filter((n) => /\.\d+\.log$/.test(n)).length, 0, '列不出目录就不许封存')
+      const rows = await readAllRows(dir)
+      const mine = rows.filter((r) => r.event === 'nolist.row')
+      assert.equal(mine.length, 50, '一行不丢')
+      assert.equal(new Set(mine.map((r) => JSON.stringify(r.fields))).size, 50, '一行也不许变两份')
+      const degRows = rows.filter((r) => r.event === 'log.rotate.degraded')
+      assert.ok(degRows.length >= 1, '降级要留一行 info 自监控')
+      assert.equal(degRows[0].fields.reason, 'no-listdir')
+      assert.equal(log.store.getDroppedCount(), 0)
+      log.store.release()
+    } finally {
+      await rm(cacheDir, { recursive: true, force: true })
+    }
+  })
+
+  // B1f：适配器的 rename 真搬，但搬到**别的名字**上（不是请求的封存名）。旧实现会报「没封成」→
+  // 旧文被整篇重写一遍（磁盘上两份）；现在按「目录里多出了一个原本没有的文件」判定为已搬走，
+  // 清空 existing，绝不重写旧文。
+  it('B1f rename 搬到了别的名字：算搬走、不重写旧文、一行不变两份', async () => {
+    const hostMod = await load('host.js')
+    const cacheDir = await makeCacheDir()
+    const dir = path.join(cacheDir, 'logs-wrongname')
+    try {
+      const fsWrongName = {
+        resolve: async (p) => ({ path: String(p) }),
+        async readText(t) {
+          try {
+            return await readFile(String(t.path ?? t), 'utf8')
+          } catch (e) {
+            void e
+            return ''
+          }
+        },
+        async writeText(t, text) {
+          const p = String(t.path ?? t)
+          await mkdir(path.dirname(p), { recursive: true })
+          await writeFile(p, String(text), 'utf8')
+        },
+        async mkdir(d) {
+          await mkdir(String(d), { recursive: true })
+        },
+        async unlink(t) {
+          try {
+            await unlink(String(t.path ?? t))
+          } catch (e) {
+            void e
+          }
+        },
+        async listDir(t) {
+          return names(String(t.path ?? t))
+        },
+        // 真搬走，但把序号写成了 9（不是请求的 .1）。
+        async rename(from, to) {
+          const a = String(from.path ?? from)
+          const b = String(to.path ?? to).replace(/\.1\.log$/, '.9.log')
+          await rename(a, b)
+        }
+      }
+      const log = hostMod.createHostLog(
+        {
+          fs: fsWrongName,
+          timer: realTimer(),
+          getCacheDir: async () => cacheDir,
+          getPlatform: async () => null,
+          DEFAULT_CWD: cacheDir
+        },
+        { pluginId: 'wrongname', prefix: 'wrongname', maxSize: 400 }
+      )
+      for (let r = 0; r < 5; r += 1) {
+        for (let i = 0; i < 10; i += 1) log.store.log('warn', 'wn.row', { r, i })
+        await log.store.synced()
+      }
+      const files = await names(dir)
+      assert.ok(files.some((n) => /\.9\.log$/.test(n)), '文件确实搬到了别的名字上')
+      assert.equal(files.filter((n) => /\.1\.log$/.test(n)).length, 0, '请求的封存名上不该有东西')
+      const rows = await readAllRows(dir)
+      const mine = rows.filter((r) => r.event === 'wn.row')
+      assert.equal(mine.length, 50, '一行不丢')
+      assert.equal(new Set(mine.map((r) => JSON.stringify(r.fields))).size, 50, '旧文不许被重写一遍（一行不变两份）')
       assert.equal(log.store.getDroppedCount(), 0)
       log.store.release()
     } finally {

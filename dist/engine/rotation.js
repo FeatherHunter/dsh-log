@@ -38,17 +38,22 @@ export function createRotation(input) {
         }
     }
     // 封存当日可写文件：rename 到 `<当日名>.<N>.log`，N 取目录里已有最大序号 + 1（跨实例也准）。
-    // 返回 { sealed }＝真封存成功；返回 { sealed: null, reason }＝没封成，调用方必须降级为继续追加（绝不丢行）。
+    // 成功给封存名；没封成给原因，调用方必须降级（继续追加或当已搬走），**任何一条路径都不许让行变两份**。
     //
-    // 为什么改名后要**回查目录**（2026-10-14 soak 咬出）：rename 只是「调用方说它成功了」，
-    // 不是「文件真的搬走了」。适配器可能是空实现、可能返回 undefined、也可能忘了 await 自己的异步改名。
-    // 只要目标名没出现在目录里，就当这次封存没发生——否则调用方会以为旧文已搬走而清空 existing，
-    // 下一次写盘把整份文件覆盖成新行，**此前所有行静默消失**（20k 行风暴实测丢了 12500 行、
-    // dropped 仍是 0）。验证失败的代价只是这份文件长过阈值（文档已写明这条降级），比丢整篇便宜得多。
+    // 两条纪律（都是审查/soak 咬出来的）：
+    //  1. **先确认「列得出目录」再动手**（2026-10-14 独立审查 N1）：rename 是不可逆副作用。
+    //     若适配器没有 listDir（`src/platform/ports.ts` 明说能力全可选，INTEGRATION 也允许省略），
+    //     先 rename 就会把文件真搬走、却因为回查不了而报「没封成」→ 调用方保留 existing 把整篇写回当日文件，
+    //     **每一行在磁盘上出现两份**，而 dropped 仍是 0、ready 仍报 ok。所以列不出目录就根本别 rename。
+    //  2. **改完回查目录**（2026-10-14 soak 咬出）：rename 只是「调用方说它成功了」，不是「文件真的搬走了」。
+    //     空实现、返回 undefined、忘了 await 自己的异步改名——都算没搬走。照单全收会让下一次写盘
+    //     把整份文件覆盖成新行，此前所有行静默消失（20k 行风暴实测丢 12500 行、dropped 仍是 0）。
     async function sealCurrentFile(logDir, fileName, dayKey) {
         if (!fs || typeof fs.rename !== 'function')
             return { ok: false, reason: 'no-rename' };
-        const names = (await listLogNames(logDir)) || [];
+        const names = await listLogNames(logDir);
+        if (names === null)
+            return { ok: false, reason: 'no-listdir' };
         const idx = nextSealIndex(config, names, fileName, sealSeq.get(logDir + '|' + dayKey) || 0);
         const sealedName = sealedNameOf(fileName, idx);
         try {
@@ -58,12 +63,24 @@ export function createRotation(input) {
             void e;
             return { ok: false, reason: 'rename-threw' };
         }
-        // 回查：列不出目录（能力缺失）也算没封成——不能验证就不许假设它成功。
         const after = await listLogNames(logDir);
-        if (after === null || after.indexOf(sealedName) < 0)
-            return { ok: false, reason: 'rename-not-effective' };
-        sealSeq.set(logDir + '|' + dayKey, idx);
-        return { ok: true, sealed: sealedName };
+        if (after !== null && after.indexOf(sealedName) >= 0) {
+            sealSeq.set(logDir + '|' + dayKey, idx);
+            return { ok: true, sealed: sealedName };
+        }
+        // 回查不到目标名，再问一句「目录里有没有多出一个原本没有的文件」：
+        // 多出来了 = 它搬到了别的名字上（适配器撒谎、改名实现有 bug），也算搬走了——清空 existing，
+        // 绝不把旧文重写一遍造成重复；一个都没多出来 = 真没搬走，降级为继续追加。
+        // 判据只认「看得见的新文件」：列不出目录时宁可当成没搬走（代价只是文件长过阈值），
+        // 绝不赌它搬走了——赌错就是整篇被覆写，那是丢数据。
+        if (after !== null) {
+            const appeared = after.filter((n) => n !== fileName && names.indexOf(n) < 0);
+            if (appeared.length > 0) {
+                sealSeq.set(logDir + '|' + dayKey, idx);
+                return { ok: true, sealed: appeared[0] };
+            }
+        }
+        return { ok: false, reason: 'rename-not-effective' };
     }
     // audit.json：与日志同目录（同桶审计写入，不算共写），逐次追加一行；失败只当没记，绝不影响写盘结果。
     async function appendAudit(logDir, record) {

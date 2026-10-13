@@ -41,6 +41,14 @@ const res = await phones.handleLogQuery({ pluginId: 'wf' })
 if (res.denied) return '无权：只查自己插件的日志'
 ```
 
+分页与游标（第六参 `page`，回包字段：`ok` / `entries` / `denied` / `expired` / `nextCursor` / `skipped`）：
+
+- `page.limit` 每页上限 100；把 `nextCursor` **原样**传回下一页（格式与语义都不承诺稳定，别自己拼）。
+- 游标记的是「上一页最后一行在文件里的位置」。**翻页途中新追加的行**不会让已返回的行重复、也不会漏读，所以只追加的消费方一路 `append` 即可。
+- 回包里 `expired: true` 表示**当天的文件集合变了**（封存、清理、跨天）——这一页已经从最新一行重新开始，请把本次查询已累积的结果**清掉重新翻**：宁可重读，不漏读。
+- `traceId` 查询走 `traceChain` 通道：整链一次给全，不受 `limit` 截断；跨桶伪造的 `traceId` 读被拒（`denied`），源行不会被删。
+- `skipped` 是「v != 3 的旧格式行」计数：老版本写的行不参与查询，但仍在文件里、导出看得见。
+
 宿主侧 `await store.synced()` 等落盘；Node 短命程序注册退出钩 `store.beforeExit()`（重复调用只注册一次），或直接 `await log.ready`（Node 入口的 ready：读一次刷一次，回执 `{ ok, pending, lastPersistFail }`，`ok` 为真才是真落定）。
 
 ## 0. 我该读哪儿
@@ -217,11 +225,12 @@ clientLog.log('info', 'my.event', { step: 'started' })   // info 需开关打开
 一天一个可写文件：`<cacheDir>/logs-<pluginId>/YYYY-MM-DD.log`。写盘是「读旧文 + 拼新行 + 全文覆写」（文件服务没有追加原语），所以按天分文件把单次覆写体积封顶在一天之内；再超就在写之前封存。
 
 - **封存**：写这批之前，若「当日文件已有内容 + 这批要写的字节数 > `maxSize`」，先把当日文件**原子改名**成 `YYYY-MM-DD.N.log`（`N` 从 1 起取当前没占用的最小序号），再新建当日文件写这批；封存成功记 `audit.json` 一条 `rotate.seal`，并落一行 info 自监控 `log.rotate.seal`（带 `file`/`sealed`）。
-- **没有 rename 能力、或改名没真生效，就降级**：宿主给的 fs 没有 `rename` 时不封存、继续追加（绝不拿「复制 + 截断」冒充原子改名），并落一行 info 自监控 `log.rotate.degraded`，`reason` 如实写是哪一种：
-  - `no-rename`——适配器根本没提供 rename；
+- **不能安全封存时就降级**：绝不拿「复制 + 截断」冒充原子改名，也绝不在一行会变两份的路径上动手。落一行 info 自监控 `log.rotate.degraded`，`reason` 如实写是哪一种：
+  - `no-listdir`——适配器没提供 `listDir`（列不出目录就无法在改名后验证，所以**根本不改名**）。这是能力协商的第一道闸：rename 是不可逆副作用，验不了就别做；
+  - `no-rename`——适配器没提供 `rename`；
   - `rename-threw`——rename 抛错；
-  - `rename-not-effective`——rename 没抛错，但**回查目录时目标名不在**（空实现、返回 undefined、忘了 await 自己的异步改名都算）。
-  三种情况都继续追加、一行不丢。为什么改名后一定要回查目录：rename 只代表「调用方说它成功了」，不代表文件真搬走了；照单全收会让下一次写盘把整篇覆盖成新行，此前所有行静默消失（2026-10-14 的 20k 行风暴实测丢了 12500 行而 `dropped` 仍是 0）。
+  - `rename-not-effective`——rename 没抛错，但回查目录时目标名不在、且目录里**也没有多出任何原本没有的文件**（空实现、返回 undefined、忘了 await 自己的异步改名都算）。
+  四种情况都继续追加、一行不丢。两条判据的理由：**先看能不能验证再动手**——否则文件被真搬走却报「没封成」，调用方会把旧文整篇写回当日文件，每一行在磁盘上出现两份（而 `dropped` 仍是 0）；**改名后一定要回查目录**——rename 只代表「调用方说它成功了」，不代表文件真搬走了，照单全收会让下一次写盘把整篇覆盖成新行，此前所有行静默消失（2026-10-14 的 20k 行风暴实测丢了 12500 行而 `dropped` 仍是 0）。反过来，若回查时目录里**多出了一个原本没有的文件**，就说明它搬到了别的名字上——这也算搬走（清空内存里的旧文，绝不重写一遍造成重复），`log.rotate.seal` 行里 `sealed` 记实际出现的新名字。
 - **保留按天**：每次写盘前顺手清过期——日期早于「今天往前 `maxDays - 1` 天」的 `.log` 删掉；当日可写文件、开关文件、`audit.json` 永不删。清理记 `audit.json` 一条 `retain.evict`（带 `removed` 列表与 `keptDays`），并落一行 info 自监控 `log.retain.evict`。
 - **单批自己就超阈值**：这批的字节数本身就大于 `maxSize` 时无法封存（没有旧文可封），照常写入并落一行 info 自监控 `log.rotate.oversize`（带 `file`/`bytes`/`maxSize`）——不静默。
 - **审计**：日志目录里的 `audit.json` 逐条记账（`rotate.seal`、`retain.evict`），一行一条 JSON。
@@ -282,14 +291,14 @@ npm publish --dry-run
 门禁跑法（改包后全跑，退出码全 0 才算过）：
 
 ```sh
-npm test                              # = node --test "tests/*.test.mjs"：宿主、客户端、事件清单、Node 入口、全栈隔离、轮转与保留、运行时行为（T7）、快照门禁、查询分页（#20）、追踪链路（#24）、端到端真机链路、接缝不变式（#25）、硬杀耐久（#23）、发行面（#27）、消费方类型编译（#27）、公开面快照、架构门禁（分层与环）——共十七个测试文件、node 自报 16 套（公开面快照与架构门禁同属门禁类）
+npm test                              # = node --test "tests/*.test.mjs"：宿主、客户端、事件清单、Node 入口、全栈隔离、轮转与保留、常驻级别（清单声明放行）、运行时行为（T7）、快照门禁、查询分页（#20）、追踪链路（#24）、端到端真机链路、接缝不变式（#25）、硬杀耐久（#23）、发行面（#27）、消费方类型编译（#27）、公开面快照、架构门禁（分层与环）——共十八个测试文件、node 自报 17 套（公开面快照与架构门禁同属门禁类）
 node --test tests/snapshot.test.mjs   # 单跑快照确认制门禁
 node tests/update-snapshots.mjs       # 清单新增字段后：先把黄转绿再提交（这是更新快照，不是判绿）
 ```
 
 快照门禁只有黄/红两档（#18 Q6）：黄 warn——清单新增字段但快照未更新（`tests/snapshot.test.mjs` 只警告不判红，跑 `node tests/update-snapshots.mjs` 一键更新即转绿，不阻排障）；红 error——未知事件名、envelope 非法（落盘行五键 `{v,ts,level,event,fields}` 中 `v` 不为 3 或形状不对）、事件总数突变（与 `tests/event-snapshots/_baseline.json` 比 ±超 5 且 `tests/event-snapshots/CHANGELOG.md` 无说明；红的是“无 changelog”不是字段本身，补说明后跑更新命令即转绿）。事件条数就记在 `tests/event-snapshots/` 这套快照里，别在文档里抄数字。
 
-`npm test` 的用例清单来自 `package.json` 的 `test` 脚本（上面那十七个文件、共 **153 例**；`pretest` 会先跑 `node build.mjs`，所以测试一定在最新产物上跑）。类型检查：`npm run typecheck`（脚本内已直调 `node node_modules/typescript/bin/tsc`，绕开仓库里那个指向失效路径的 `.bin/tsc` 垫片）。发行面那两套（`release-surface`、`consumer-types`）会把包按 junction 装进临时工程、用真 tsc 编译一次，所以「类型能不能被消费者用上」是门禁里跑出来的结论，不是文档里的承诺。
+`npm test` 的用例清单来自 `package.json` 的 `test` 脚本（上面那十八个文件、共 **165 例**；`pretest` 会先跑 `node build.mjs`，所以测试一定在最新产物上跑）。类型检查：`npm run typecheck`（脚本内已直调 `node node_modules/typescript/bin/tsc`，绕开仓库里那个指向失效路径的 `.bin/tsc` 垫片）。发行面那两套（`release-surface`、`consumer-types`）会把包按 junction 装进临时工程、用真 tsc 编译一次，所以「类型能不能被消费者用上」是门禁里跑出来的结论，不是文档里的承诺。
 
 ### 9.1 源码分层（贡献者视角）
 
