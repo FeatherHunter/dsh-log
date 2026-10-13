@@ -175,6 +175,11 @@ export function createPipeline(input: PipelineInput): Pipeline {
     // 冲突期攒下的自监控行（只有一行，不进队列、不占配额、不计 dropped）：等闸门解除后的下一轮 flush 落盘，
     // 绝不因为「自己刚判了冲突」把这条诊断本身也丢掉（#19 审查必改 R3/R5）。
     let deferredSelfMon: QueuedRow | null = null
+    // 跨进程可观测（2026-10-14 四维审查必改 4）：记住自己上次写完这份文件的字节数，下次读回来对不上，
+    // 就说明这份文件被**别的写者**动过（另一个进程，或同进程里的另一份模块副本）。零额外 IO——这次读本来就要做。
+    // 它只是「事后发现」：挡不住读改写窗口内的并发覆写，也猜不出被吃了几行，所以只留诊断、不谎报 dropped。
+    let expectedFileName = ''
+    let expectedFileBytes = -1
     function notePersistFail(op: string, reason: string, dir: string): void {
       if (!pendingPersistFail) pendingPersistFail = { op: op, reason: reason, dir: String(dir || '') }
       try {
@@ -680,8 +685,10 @@ export function createPipeline(input: PipelineInput): Pipeline {
         const doOnce = async (): Promise<void> => {
           const target = await resolveTarget(await joinLogPath(logDir, fileName))
           let existing = ''
+          let readOk = false
           try {
             existing = await readTarget(target)
+            readOk = true
           } catch (eRead) {
             void eRead
             existing = ''
@@ -692,6 +699,11 @@ export function createPipeline(input: PipelineInput): Pipeline {
             extra += await retainSweep(logDir, fileName, dayKey)
           }
           const existingBytes = utf8Bytes(existing)
+          // 跨进程可观测：读回来的长度与我们自己上次写完的长度对不上 → 有别的写者动过这份文件。
+          // 读失败（readOk 为假）不算：那是读不出来，不是被人改过。
+          if (readOk && fileName === expectedFileName && expectedFileBytes >= 0 && existingBytes !== expectedFileBytes) {
+            notePersistFail('writeBatch', 'foreign-write', logDir)
+          }
           const pendingBytes = utf8Bytes(text)
           if (existingBytes > 0 && existingBytes + pendingBytes > config.maxSize) {
             const seal = await sealCurrentFile(logDir, fileName, dayKey)
@@ -727,7 +739,11 @@ export function createPipeline(input: PipelineInput): Pipeline {
               maxSize: config.maxSize
             })
           }
-          await writeTarget(target, String(existing || '') + text + extra)
+          const payload = String(existing || '') + text + extra
+          await writeTarget(target, payload)
+          // 记下我们写完的长度：下一次读回来若对不上，就是有别的写者动过（见上方 foreign-write 判定）。
+          expectedFileName = fileName
+          expectedFileBytes = utf8Bytes(payload)
         }
         try {
           await doOnce()

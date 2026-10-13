@@ -23,16 +23,24 @@ await log.ready   // 读一次刷一次：把此刻为止的行刷到底，再�
 > - `release()` 同步幂等；释放那一刻若还有一批正在写盘，交还会延后到这批写完（同步路径下写盘在途时第二个实例仍当场抛）。
 > - `await synced()` 会把闸门解除后攒下的诊断行也带出去；**闸门仍活**（对方还持有目录）时它合法滞留，此时 `getPendingCount()` 会如实大于 0，不会假报刷完。
 > - 同一 `cacheDir` 下不同 `pluginId` 各写自己的目录与开关文件，可以并存。
-> - **跨进程没有登记（风险提示，不是保证）**：登记表是模块副本级的，另一个进程看不见。实测两个真进程同目录各写各的都能成功、两边的行都在；危险窗口是**并发读改写**——两个进程同时刷盘时，后写者按自己读到的旧内容整份覆写，可能吃掉对方刚写的行。不要这样用。
+> - **跨进程没有登记（风险提示，不是保证）**：登记表是模块副本级的，另一个进程看不见。不同时刷盘时两边的行都在；**真并发同目录会静默吃行**——两个进程同时刷盘时，后写者按自己读到的旧内容整份覆写，吃掉对方刚写的行（实测两进程各写 5 行、间隔 30 毫秒，10 行只剩 9 行；双方 `exit 0`，不增 `dropped`）。0.3.0 补了**事后可观测**：我们记得自己上次写完这份文件的字节数，下次读回来对不上就落一条 `log.persist.fail(reason: 'foreign-write')` 诊断行（零额外 IO，被吃掉的进程下一次刷盘时通常能自己发现；挡不住读改写窗口内的并发，也不猜被吃了几行）。正确做法仍然是一个日志目录只给一个写者。
 
-DSH 插件宿主侧（3 行）：
+DSH 插件宿主侧（接线 3 步，运行依赖由宿主提供）：
 
 ```js
 import { createHostLog, registerHostLogPhones } from 'dsh-log/host'
 const registry = new Map()                                  // 这张表要留着：宿主调用通道按名字取它
-const hostLog = createHostLog(deps, { pluginId: 'wf', prefix: 'wf' })
-registerHostLogPhones(registry, hostLog)
+const hostLog = createHostLog(
+  { fs, timer, getCacheDir, getPlatform, DEFAULT_CWD },      // 五个运行依赖由宿主传入，最小形状见 INTEGRATION.md 步骤 2
+  { pluginId: 'my-plugin', prefix: 'my-plugin' }             // 双必填：缺任一建库即抛中文错
+)
+registerHostLogPhones(registry, hostLog)                     // 注册 5 个写侧动作 + 1 个只读查询电话
 ```
+
+> `getCacheDir`（无入参、回日志根目录）**必须给**：它是日志根目录的唯一来源，少了它每一行都无处落盘——
+> 所以 `createHostLog` 建库当场抛中文错，而不是让你运行半天才发现 `dropped` 在涨。
+> 其余四个依赖可省（`fs` 的读写方法要正常落盘也必须有，缺了写盘时抛「文件服务不可写」）。
+> 只想在自己的 Node 程序里写日志，用上面的 `dsh-log/node` 入口即可，不必手配这五个依赖。
 
 两条规矩（0.3.0）：保落盘认 `store.synced()`（已落地）——刷完当期队列、等到在途写盘真的收尾才 resolve，杀进程前调此即不丢；`store.flush()` 只管安排刷盘，调了不等于写完；查日志先判无权（查询电话名 = 前缀加 `.logQuery`，六参：`timeRange`、`pluginId`、`level`、`keyword`、`traceId`、`page`；宿主入口注册 5 个写侧动作加这个只读查询，共 6 个）：
 
@@ -103,7 +111,7 @@ const report = await log.ready   // 读一次刷一次；report.ok 为真才代�
 
 三条要知道的事：
 
-1. **`await log.ready` 不能省**。落盘是先入内存队列、再由约 1000 毫秒的防抖窗口异步写下去的：程序顺着事件循环自然跑完，Node 会等这个定时器，日志自己会落；但结尾调了 `process.exit()`、抛错退出或被强杀的程序，队列里还没写下去的那批就随进程消失（`warn` 与 `info` 一样会丢）。命令行工具通常在结尾显式退出，所以这条按必须处理。`log.ready` 是**读一次刷一次**的只读属性：取它的那一刻，把此刻为止入队的行刷到底，再回执 `{ ok, pending, lastPersistFail }`——`ok` 为真表示队列与重试位都空了、前面每一行都在文件里；写盘失败时 `ok` 为假、`pending` 是还压着的行数、`lastPersistFail` 是最近一次失败的定位元（`op`/`reason`/`dirHash`，不含真实路径）。磁盘恢复后再读一次就会补落盘。同一件事也可以改用 `await log.store.synced()`（刷完当期队列才 resolve，口径见第 12 节步骤 4），或先 `log.store.beforeExit()` 注册退出钩（重复调用只注册一次）。入口**不往用户文件里写任何内部路标行**（0.3.0 修正：从前那行 debug 级 `log.flush.marker` 在开关关着时根本不落盘，等于没判据）。
+1. **`await log.ready` 不能省**。落盘是先入内存队列、再由约 1000 毫秒的防抖窗口异步写下去的：程序顺着事件循环自然跑完，Node 会等这个定时器，日志自己会落；但结尾调了 `process.exit()`、抛错退出或被强杀的程序，队列里还没写下去的那批就随进程消失（**`error` 与 `warn`、`info` 一样会丢**——「直通」只是不等那 1000 毫秒防抖，写盘仍是异步的；实测 `log('error', …)` 紧跟 `process.exit(0)` 是 0 行落盘。只有 `await log.ready` / `await log.store.synced()` 才能保）。命令行工具通常在结尾显式退出，所以这条按必须处理。`log.ready` 是**读一次刷一次**的只读属性：取它的那一刻，把此刻为止入队的行刷到底，再回执 `{ ok, pending, lastPersistFail }`——`ok` 为真表示队列与重试位都空了、前面每一行都在文件里；写盘失败时 `ok` 为假、`pending` 是还压着的行数、`lastPersistFail` 是最近一次失败的定位元（`op`/`reason`/`dirHash`，不含真实路径）。磁盘恢复后再读一次就会补落盘。同一件事也可以改用 `await log.store.synced()`（刷完当期队列才 resolve，口径见第 12 节步骤 4），或先 `log.store.beforeExit()` 注册退出钩（重复调用只注册一次）。入口**不往用户文件里写任何内部路标行**（0.3.0 修正：从前那行 debug 级 `log.flush.marker` 在开关关着时根本不落盘，等于没判据）。
 2. **开关每次新建时会被读回来**。独立程序每次调用都是新进程，所以入口建库时会把上次留下的开关读回来，打开的详细日志在下次调用仍然生效；写入用 `log.store.handleLogSetSwitch({ enabled: true })`。
 3. **级别规则与插件侧完全一致**：错误与告警恒落盘；`info` 只在开关打开时落盘，**除非这个事件名在常驻集合里**——常驻集合 = 包内固定 43 个 DSH 事件名 ∪ 调用方清单（`eventList`）里标了 `kind: 'resident'` 的事件名；`debug` 同样只在开关打开时落盘。
 
@@ -220,6 +228,8 @@ clientLog.log('info', 'my.event', { step: 'started' })   // info 需开关打开
 
 开关读写失败保持旧值，不回退为开启。客户端写开关失败原因只给机器码（`host-unavailable`、`host-rejected`、`switch-timeout`、`stale` 等），面向用户的文案由界面经多语言系统转换。
 
+`log.persist.fail` 的 `reason` 取值（都是内部自监控行，`level` 为 `warn`，不计入 `dropped`）：`write-fail`（写盘重试后仍失败，行在重试位）、`dir-conflict`（目录或开关文件被别的活跃写者占着）、`no-dir`（取不到日志目录）、`foreign-write`（**跨进程可观测**：下次读回来发现这份文件的长度与我们自己上次写完的对不上——说明有别的写者动过它，见第 1 节末条）。`foreign-write` 只报告「有人动过」，不猜被吃了几行，所以丢弃数不会跟着涨。
+
 ## 6.1 轮转与保留（#21）
 
 一天一个可写文件：`<cacheDir>/logs-<pluginId>/YYYY-MM-DD.log`。写盘是「读旧文 + 拼新行 + 全文覆写」（文件服务没有追加原语），所以按天分文件把单次覆写体积封顶在一天之内；再超就在写之前封存。
@@ -298,7 +308,7 @@ node tests/update-snapshots.mjs       # 清单新增字段后：先把黄转绿�
 
 快照门禁只有黄/红两档（#18 Q6）：黄 warn——清单新增字段但快照未更新（`tests/snapshot.test.mjs` 只警告不判红，跑 `node tests/update-snapshots.mjs` 一键更新即转绿，不阻排障）；红 error——未知事件名、envelope 非法（落盘行五键 `{v,ts,level,event,fields}` 中 `v` 不为 3 或形状不对）、事件总数突变（与 `tests/event-snapshots/_baseline.json` 比 ±超 5 且 `tests/event-snapshots/CHANGELOG.md` 无说明；红的是“无 changelog”不是字段本身，补说明后跑更新命令即转绿）。事件条数就记在 `tests/event-snapshots/` 这套快照里，别在文档里抄数字。
 
-`npm test` 的用例清单来自 `package.json` 的 `test` 脚本（上面那十八个文件、共 **166 例**；`pretest` 会先跑 `node build.mjs`，所以测试一定在最新产物上跑）。类型检查：`npm run typecheck`（脚本内已直调 `node node_modules/typescript/bin/tsc`，绕开仓库里那个指向失效路径的 `.bin/tsc` 垫片）。发行面那两套（`release-surface`、`consumer-types`）会把包按 junction 装进临时工程、用真 tsc 编译一次，所以「类型能不能被消费者用上」是门禁里跑出来的结论，不是文档里的承诺。
+`npm test` 的用例清单来自 `package.json` 的 `test` 脚本（上面那十八个文件、共 **168 例**；`pretest` 会先跑 `node build.mjs`，所以测试一定在最新产物上跑）。类型检查：`npm run typecheck`（脚本内已直调 `node node_modules/typescript/bin/tsc`，绕开仓库里那个指向失效路径的 `.bin/tsc` 垫片）。发行面那两套（`release-surface`、`consumer-types`）会把包按 junction 装进临时工程、用真 tsc 编译一次，所以「类型能不能被消费者用上」是门禁里跑出来的结论，不是文档里的承诺。
 
 ### 9.1 源码分层（贡献者视角）
 

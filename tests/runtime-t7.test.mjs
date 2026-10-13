@@ -402,3 +402,55 @@ describe('T7 运行时行为（#18 队列口径 + 0.3.0 追踪分流）', () => 
     assert.equal(logger.why().shadowWarns, 1, '无冲突不加影子计数')
   })
 })
+
+// 跨进程可观测（2026-10-14 四维审查必改 4）：跨进程并发写同一目录目前挡不住，但不能再「静默」。
+// 实现口径：记住自己上次写完这份文件的字节数，下次读回来对不上就留一条 log.persist.fail(reason=foreign-write)，
+// 零额外 IO（这次读本来就要做）；只事后发现，不猜丢了几行（所以不谎报 dropped）。
+describe('跨进程可观测：别的写者动过文件要留诊断', () => {
+  it('文件被外部追加过：下一批留一条 foreign-write，且不覆盖对方的行', async () => {
+    const t = await makeStore()
+    try {
+      t.store.log('warn', 'fw.one', {})
+      await t.store.synced()
+      assert.equal((await t.rows()).filter((r) => r.event === 'fw.one').length, 1)
+
+      // 模拟另一个进程：直接往同一个文件里追加一行（长度变了，而我们没写过它）。
+      const foreign = JSON.stringify({ v: 3, ts: Date.now(), level: 'warn', event: 'foreign.row', fields: {} })
+      await writeFile(t.dayFile(), (await readFile(t.dayFile(), 'utf8')) + foreign + '\n', 'utf8')
+
+      t.store.log('warn', 'fw.two', {})
+      await t.store.synced()
+
+      const rows = await t.rows()
+      assert.equal(rows.filter((r) => r.event === 'foreign.row').length, 1, '对方的行不许被整份覆写掉')
+      assert.equal(rows.filter((r) => r.event === 'fw.two').length, 1, '自己的行照常落盘')
+      const diag = rows.filter((r) => r.event === 'log.persist.fail')
+      assert.equal(diag.length, 1, '要恰有一条诊断行，不刷屏')
+      assert.equal(diag[0].level, 'warn')
+      assert.equal(diag[0].fields.reason, 'foreign-write')
+      assert.deepEqual(Object.keys(diag[0].fields).sort(), ['dirHash', 'op', 'pluginId', 'reason'])
+      assert.equal(diag[0].fields.op, 'writeBatch')
+      assert.equal(typeof diag[0].fields.dirHash, 'string')
+      assert.equal(String(diag[0].fields.dirHash).includes(t.cacheDir), false, '诊断行不带真实路径')
+    } finally {
+      await t.cleanup()
+    }
+  })
+
+  it('自己连写三批不算「别的写者」：零假诊断', async () => {
+    const t = await makeStore()
+    try {
+      for (const event of ['fp.one', 'fp.two', 'fp.three']) {
+        t.store.log('warn', event, {})
+        await t.store.synced()
+      }
+      assert.deepEqual(
+        (await t.rows()).map((r) => r.event),
+        ['fp.one', 'fp.two', 'fp.three'],
+        '自己写的长度自己认得，不该冒出 foreign-write 之类的假诊断'
+      )
+    } finally {
+      await t.cleanup()
+    }
+  })
+})

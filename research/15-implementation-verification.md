@@ -9,8 +9,8 @@
 | 门禁 | 命令 | 当前结果 |
 | --- | --- | --- |
 | 类型 | `node node_modules/typescript/bin/tsc -p tsconfig.json` | exit 0（`.bin/tsc` 垫片坏，必须直调） |
-| 全量测试 | `npm test`（pretest 先 `node build.mjs`） | **166/166，17 套，exit 0** |
-| 变异表 | `pwsh -NoProfile -File .local/mutation-check.ps1` | 60 条，基线先全绿、逐条必须 RED（见第五节） |
+| 全量测试 | `npm test`（pretest 先 `node build.mjs`） | **168/168，18 套，exit 0** |
+| 变异表 | `pwsh -NoProfile -File .local/mutation-check.ps1` | **61 条，基线先全绿、逐条 RED、0 SKIP/0 GREEN**（见第五节） |
 | 长跑自检 | `node tests/soak.mjs 0 --fast` / `node tests/soak.mjs 6` | 快速模式通过；全量见第四节 |
 | 构建可复现 | `rm -rf dist && node build.mjs` | 产物与删除前逐字节一致 |
 | 发行面 | `npm pack --dry-run` | 93 文件、44 个 `.d.ts`、114.8 kB |
@@ -85,7 +85,24 @@
   整批丢、计数不动。改为：`rejected` 有限且 >0 才采信，否则按 `entries.length - accepted` 兜底
   （仍不合法就整批计）。回归线在 `tests/client.test.mjs`（三档：无 rejected / accepted=1 / rejected=1）。
 
-### 5. 无效变异与假覆盖（方法学）
+### 4b. 四维审查（独立审查者 1fd38375，2026-10-14）：三条文档不实 + 跨进程可观测
+四维判定：质量过硬=中偏强、功能正常=强、集成简单=中偏强、README 专业=中偏强；4 条编号必改（3 条文档 + 1 条可观测）。
+- **必改 1（README 头部的「error 永不丢」在 abrupt exit 下不成立）**：实测 `log('error', …)` 紧跟
+  `process.exit(0)` 是 0 行落盘（「直通」只是不等 1000 毫秒防抖，写盘仍是异步的）。README 那句括号
+  只点了 `warn`/`info`，读者会得出「error 不丢」。已改成「**`error` 与 `warn`、`info` 一样会丢**；
+  只有 `await log.ready` / `await store.synced()` 才能保」，并写明实测现象。
+- **必改 2（跨进程那句过于乐观）**：「两个真进程同目录各写各的都能成功、两边的行都在」被真并发证伪——
+  两进程各写 5 行、间隔 30 毫秒，10 行只剩 9 行，双方 exit 0、不增 dropped、不落诊断行。README 已改为
+  「不同时刷盘时都在；真并发会静默吃行」。
+- **必改 3（INTEGRATION 路线 A 不提现成的 fs/timer 工厂）**：插件作者照抄要自己实现六个方法。步骤 2 已补
+  `createNodeFileService()` / `createNodeTimer()` 可直接当 `fs` / `timer` 用，并给 5 行示例。
+- **必改 4（跨进程丢行缺可观测量）→ 已实现「事后可观测」**（`src/engine/pipeline.ts`）：记住自己上次
+  写完这份文件的字节数，下次读回来对不上（且这次读成功、文件名没变）就 `notePersistFail('writeBatch',
+  'foreign-write', logDir)`，由既有的自监控通道落一行 `log.persist.fail`。零额外 IO（这次读本来就要做）；
+  **只事后发现，挡不住读改写窗口内的并发覆写，也不猜被吃了几行**（所以不谎报 dropped）。回归线
+  `tests/runtime-t7.test.mjs` 两例（外部追加 → 恰一条 `foreign-write` 且对方的行不被覆写；自己连写三批 →
+  零假诊断），变异 **M61** 咬住。README 第 1 节末条与第 6 节的 reason 取值表已同步。
+
 - **M45 无效**：把 `exports.types` 指向不存在的文件 → 测试仍绿，因为 TS 会退回同目录的 `node.d.ts`。
   改成掏空声明本体（TS2305）才 RED。
 - **M20 无效**：把 `flushNow` 在途分支改成返回已 resolve 的 promise → 咬不住，因为 `synced()` 自己用

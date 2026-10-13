@@ -126,7 +126,15 @@ registerHostLogPhones(registry, hostLog)
 三件事要对上：
 
 1. `pluginId` 与 `prefix` 双必填（缺任一即抛中文错），都换成自己插件的标识（小写英文字母、数字、中横线，1 到 32 个字符，大写直接报错）。
-2. 五个运行依赖由你传入现成的对象：文件服务 `fs`、计时器 `timer`、取缓存目录函数 `getCacheDir`、取平台函数 `getPlatform`、默认工作目录 `DEFAULT_CWD`。
+2. 五个运行依赖由你传入现成的对象：文件服务 `fs`、计时器 `timer`、取缓存目录函数 `getCacheDir`、取平台函数 `getPlatform`、默认工作目录 `DEFAULT_CWD`。**宿主里已经有 fs 端口就用它；没有的话不必自己写六个方法**——`dsh-log/node` 导出的 `createNodeFileService()` 与 `createNodeTimer()` 可以直接当 `fs` 与 `timer` 传进来（就是 `dsh-log/node` 入口自己用的那一对，实测宿主接线 11 行跑通）：
+
+   ```js
+   import { createNodeFileService, createNodeTimer } from 'dsh-log/node'
+   const hostLog = createHostLog(
+     { fs: createNodeFileService(), timer: createNodeTimer(), getCacheDir: async () => cacheDir },
+     { pluginId: 'my-plugin', prefix: 'my-plugin' }
+   )
+   ```
 3. 注册表传你自己的电话注册表（例子用 `new Map()` 示意）；注册成功的 5 个动作电话名可从 `hostLog.phoneNames` 读到，形如 `my-plugin.logBatch` 等，另外注册表里还会多一个只读查询电话 `my-plugin.logQuery`（撞名同样抛，不覆盖旧的）。
 
 五个运行依赖的最小形状（类型上五个键都可省略，省略后走退化路；要正常落盘，文件服务的读写方法与取缓存目录函数必须给）：

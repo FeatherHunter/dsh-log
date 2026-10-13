@@ -25,7 +25,17 @@ export { aggregateLogQuery } from './phones.js';
 // 双必填（#19 契约，已生效）：pluginId 与 prefix 均须显式传入，缺任一建库即抛中文错，
 // prefix 不再回退到 pluginId；'wf' 是保留命名空间（首个官方插件），新插件传自己的标识即自然隔离，
 // 电话名撞名直接抛，不覆盖旧的。
+//
+// getCacheDir 必填（2026-10-14 四维审查）：它是日志根目录的唯一来源（没有别的键能顶替；
+// DEFAULT_CWD 只在取不到目录时影响导出回退路径）。少了它，每一行都无处落盘——`log()` 照旧回
+// 'queued'、错误只有 `getDroppedCount()` 与 `ready` 里才看得见，等于把「配错依赖」变成静默丢数据。
+// 所以这里**建库当场抛中文错**，把错误挪到看得见的地方（与双必填同一口径：能当场发现的，不留到运行期）。
 export function createHostLog(deps, configInput) {
+    if (!deps || typeof deps.getCacheDir !== 'function') {
+        throw new Error('[dsh-log] 宿主入口缺依赖：deps.getCacheDir 必须是函数（无入参、回日志根目录字符串）。' +
+            '没有它每一行都无处落盘、只会静默计入丢弃数——这一步没有默认值，必须显式传。' +
+            '五个运行依赖的最小形状见 INTEGRATION.md 步骤 2。');
+    }
     const store = createLogStore(deps, configInput);
     const phoneNames = buildPhoneNames(store.config.prefix);
     return { store: store, phoneNames: phoneNames };

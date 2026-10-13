@@ -69,6 +69,9 @@ const events = (rows) => rows.map((r) => r.event)
 describe('#19 全栈隔离（五层契约）', () => {
   it('L1 电话名：双必填缺一即抛；撞名直接抛且不覆盖旧的', async () => {
     const hostMod = await load('host.js')
+    // 宿主入口现在要求 deps.getCacheDir（缺了建库即抛，见 createHostLog 的注释）：本用例不写盘，
+    // 但依赖形状要如实——真实宿主一定有取缓存目录的函数。
+    const noopDeps = { getCacheDir: async () => 'C:/noop-cache' }
 
     // 双必填：缺任一项建库即抛（fail-loud 建库期，不静默给默认值）。
     const missingPrefix = [
@@ -76,12 +79,12 @@ describe('#19 全栈隔离（五层契约）', () => {
       ['缺 prefix', { pluginId: 'iso-ph' }]
     ]
     for (const [label, input] of missingPrefix) {
-      assert.throws(() => hostMod.createHostLog({}, input), /必填/, label + ' 应抛中文错')
+      assert.throws(() => hostMod.createHostLog(noopDeps, input), /必填/, label + ' 应抛中文错')
     }
 
     const registry = new Map()
     const reg = { has: (n) => registry.has(n), set: (n, h) => registry.set(n, h) }
-    const first = hostMod.createHostLog({}, cfg('iso-ph'))
+    const first = hostMod.createHostLog(noopDeps, cfg('iso-ph'))
     const names = hostMod.registerHostLogPhones(reg, first)
     // #20 接线：5 个冻结动作 + 第 6 个只读查询电话（名字由 buildLogQueryPhoneName 单源派生）。
     assert.equal(registry.size, 6, '五个冻结动作 + 只读查询应各注册一个电话名')
@@ -91,13 +94,13 @@ describe('#19 全栈隔离（五层契约）', () => {
     const handlerOfBatch = registry.get('iso-ph.logBatch')
 
     // 撞名：同一个前缀的第二个插件注册即抛，且不得覆盖已注册的处理器。
-    const clash = hostMod.createHostLog({}, { pluginId: 'iso-ph-other', prefix: 'iso-ph' })
+    const clash = hostMod.createHostLog(noopDeps, { pluginId: 'iso-ph-other', prefix: 'iso-ph' })
     assert.throws(() => hostMod.registerHostLogPhones(reg, clash), /电话名已被注册/, '撞名应抛')
     assert.equal(registry.size, 6, '撞名失败不得留下半张表')
     assert.equal(registry.get('iso-ph.logBatch'), handlerOfBatch, '旧处理器不得被覆盖')
 
     // 不同前缀各自注册，互不干扰。
-    const second = hostMod.createHostLog({}, cfg('iso-ph-b'))
+    const second = hostMod.createHostLog(noopDeps, cfg('iso-ph-b'))
     const names2 = hostMod.registerHostLogPhones(reg, second)
     assert.equal(registry.size, 12)
     assert.equal(names2.logBatch, 'iso-ph-b.logBatch')
@@ -608,7 +611,7 @@ describe('#19 全栈隔离（五层契约）', () => {
       // 宿主入口的 syncCacheDir 是调用方直接给的字符串，没有 realpath 兜底（目录可能还不存在），
       // 归一只能靠 normalizeLogDir 自己折叠：这一组专门咬住折叠分支。
       const hostMod = await load('host.js')
-      const h1 = hostMod.createHostLog({ syncCacheDir: cacheDir }, cfg('iso-norm'))
+      const h1 = hostMod.createHostLog({ getCacheDir: async () => cacheDir, syncCacheDir: cacheDir }, cfg('iso-norm'))
       const hostSpellings = [
         ['点号段', cacheDir + path.sep + '.'],
         ['父级回退', cacheDir + path.sep + 'ghost' + path.sep + '..'],
@@ -616,7 +619,7 @@ describe('#19 全栈隔离（五层契约）', () => {
       ]
       for (const [label, dir] of hostSpellings) {
         assert.throws(
-          () => hostMod.createHostLog({ syncCacheDir: dir }, cfg('iso-norm')),
+          () => hostMod.createHostLog({ getCacheDir: async () => dir, syncCacheDir: dir }, cfg('iso-norm')),
           /已有活跃写者/,
           label + '（宿主入口）必须折叠到同一个目录键'
         )
@@ -1388,7 +1391,7 @@ describe('#19 全栈隔离（五层契约）', () => {
     const hostMod = await load('host.js')
     const registry = new Map()
     const reg = { has: (n) => registry.has(n), set: (n, h) => registry.set(n, h) }
-    const first = hostMod.createHostLog({}, cfg('iso-u5'))
+    const first = hostMod.createHostLog({ getCacheDir: async () => 'C:/noop-cache' }, cfg('iso-u5'))
     hostMod.registerHostLogPhones(reg, first)
     assert.equal(registry.size, 6, '五个冻结动作 + 第 6 个只读查询')
     // 第 6 个名字不进 phoneNames（那份映射的键类型是冻结的 5 个动作），要用名字请走单源派生。
@@ -1402,7 +1405,7 @@ describe('#19 全栈隔离（五层契约）', () => {
     const preReg = { has: (n) => pre.has(n), set: (n, h) => pre.set(n, h) }
     const foreign = () => ({ ok: true })
     preReg.set(qn, foreign)
-    const clashQuery = hostMod.createHostLog({}, cfg('iso-u5'))
+    const clashQuery = hostMod.createHostLog({ getCacheDir: async () => 'C:/noop-cache' }, cfg('iso-u5'))
     assert.throws(
       () => hostMod.registerHostLogPhones(preReg, clashQuery),
       /电话名已被注册/,
@@ -1410,11 +1413,11 @@ describe('#19 全栈隔离（五层契约）', () => {
     )
     assert.equal(pre.get(qn), foreign, '已占用的查询电话 handler 不得被覆盖')
     // 撞名：同前缀第二个插件注册即抛，且第 6 个电话的旧 handler 不得被覆盖。
-    const clash = hostMod.createHostLog({}, { pluginId: 'iso-u5-other', prefix: 'iso-u5' })
+    const clash = hostMod.createHostLog({ getCacheDir: async () => 'C:/noop-cache' }, { pluginId: 'iso-u5-other', prefix: 'iso-u5' })
     assert.throws(() => hostMod.registerHostLogPhones(reg, clash), /电话名已被注册/, '含查询电话的撞名必须抛')
     assert.equal(registry.size, 6, '撞名失败不得留下半张表')
     assert.equal(registry.get(qn), handlerOfQuery, '查询电话的旧处理器不得被覆盖')
-    const other = hostMod.createHostLog({}, cfg('iso-u5-other'))
+    const other = hostMod.createHostLog({ getCacheDir: async () => 'C:/noop-cache' }, cfg('iso-u5-other'))
     hostMod.registerHostLogPhones(reg, other)
     assert.equal(registry.size, 12, '不同前缀照常各自注册')
     assert.equal(hostMod.buildLogQueryPhoneName('iso-u5-other'), 'iso-u5-other.logQuery')

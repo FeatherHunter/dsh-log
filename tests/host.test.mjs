@@ -204,6 +204,13 @@ describe('宿主引擎单测（#559）', () => {
     assert.throws(() => createHostLog(deps, { pluginId: 'WF', prefix: 'wf' }), /非法/)
     assert.throws(() => createHostLog(deps, { pluginId: 'wf.demo', prefix: 'wf' }), /非法/)
     assert.throws(() => buildPhoneNames('WF'), /非法/)
+    // 依赖形状也 fail-loud（2026-10-14 四维审查）：getCacheDir 是日志根目录的唯一来源，
+    // 少了它每一行都无处落盘、只会静默计入丢弃数——建库当场抛，不留到运行期。
+    assert.throws(() => createHostLog(undefined, { pluginId: 'wf', prefix: 'wf' }), /getCacheDir/)
+    assert.throws(() => createHostLog({}, { pluginId: 'wf', prefix: 'wf' }), /getCacheDir/)
+    assert.throws(() => createHostLog({ getCacheDir: 'C:/not-a-function' }, { pluginId: 'wf', prefix: 'wf' }), /getCacheDir/)
+    // 只给 getCacheDir 就能建库（其余依赖走退化路，写盘时才报文件服务不可用）。
+    assert.equal(typeof createHostLog({ getCacheDir: async () => '/cache' }, { pluginId: 'wf', prefix: 'wf' }).store.log, 'function')
     // 四段式只作可选项：形状为日期点插件标识点进程号点启动时间。
     const four = createHostLog(deps, { pluginId: 'demo', prefix: 'demo', fileNamePolicy: 'four-segment' })
     await four.store.setSwitch(true)
