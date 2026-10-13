@@ -12,8 +12,8 @@
 | 项 | 命令 | 期望 |
 | --- | --- | --- |
 | 类型 | `node node_modules/typescript/bin/tsc -p tsconfig.json` | exit 0（`.bin/tsc` 垫片是坏的，别用 `npm run typecheck` 之外的垫片路径） |
-| 全量测试 | `npm test` | 176/176、19 套、exit 0 |
-| 变异表 | `pwsh -NoProfile -File scripts/mutation-check.ps1` | 基线全绿、68 条逐条 RED、0 SKIP/GREEN |
+| 全量测试 | `npm test` | 180/180、19 套、exit 0 |
+| 变异表 | `pwsh -NoProfile -File scripts/mutation-check.ps1` | 基线全绿、72 条逐条 RED、0 SKIP/GREEN/TIMEOUT |
 | 长跑自检 | `node tests/soak.mjs 6` | A 段 20000/20000、B 段查询行数 === 磁盘行数 |
 | 构建可复现 | `rm -rf dist && node build.mjs` | 产物与删除前逐字节一致（44 JS + 44 `.d.ts`） |
 | 打包干跑 | `npm publish --dry-run` | 93 文件、44 JS + 44 `.d.ts`（体积以当次输出为准） |
