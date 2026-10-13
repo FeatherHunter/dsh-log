@@ -12,11 +12,11 @@
 | 项 | 命令 | 期望 |
 | --- | --- | --- |
 | 类型 | `node node_modules/typescript/bin/tsc -p tsconfig.json` | exit 0（`.bin/tsc` 垫片是坏的，别用 `npm run typecheck` 之外的垫片路径） |
-| 全量测试 | `npm test` | 165/165、17 套、exit 0 |
-| 变异表 | `pwsh -NoProfile -File .local/mutation-check.ps1` | 基线全绿、59 条逐条 RED、0 SKIP/GREEN |
+| 全量测试 | `npm test` | 168/168、18 套、exit 0 |
+| 变异表 | `pwsh -NoProfile -File .local/mutation-check.ps1` | 基线全绿、61 条逐条 RED、0 SKIP/GREEN |
 | 长跑自检 | `node tests/soak.mjs 6` | A 段 20000/20000、B 段查询行数 === 磁盘行数 |
 | 构建可复现 | `rm -rf dist && node build.mjs` | 产物与删除前逐字节一致（44 JS + 44 `.d.ts`） |
-| 打包干跑 | `npm publish --dry-run` | 93 文件、压缩约 115 kB、解包约 358 kB |
+| 打包干跑 | `npm publish --dry-run` | 93 文件、44 JS + 44 `.d.ts`（体积以当次输出为准） |
 
 一键走完六段（体检 → 网页登录 → 版本号 → 构建与干跑 → 真发布 → 发布后验证），在**包根**用 Git Bash 跑：
 
@@ -117,7 +117,7 @@ npm notice Publishing to https://registry.npmjs.org/ with tag latest and public 
 包目录下的 `publish-wizard.sh`（不随包发布）把全过程做成六段：体检（发布目标、文件数、名字是否被占）、网页登录（扫码）、升版本号、构建与干跑、正式发布（带确认闸）、发布后验证。Windows 上用 Git 自带的 bash 跑（不要用 WSL 的 bash，路径会对不上）：
 
 ```sh
-"C:\Program Files\Git\bin\bash.exe" packages/dsh-log/publish-wizard.sh
+"C:\Program Files\Git\bin\bash.exe" publish-wizard.sh
 ```
 
 向导的"发布后验证"这一段只查官方源上的版本号，并要求把 `npm publish` 的原始输出补进本文档。另外两件事它没做，手动补上，都是几步的事：
