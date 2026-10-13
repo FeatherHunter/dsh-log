@@ -1,0 +1,52 @@
+// src/config/constants.ts —— 公开常量与级别/归类全表（公开面字面单源，别处只许引用）。
+// 级别全表的真源在 core/level.ts（LOG_LEVEL_ORDER），EVENT_LEVELS 只是它的公开别名：
+// 「哪些级别永不丢」的判定（isUrgentLevel 等）读同一份表，不会出现两处不一致。
+
+import { LOG_LEVEL_ORDER } from '../core/level.js'
+
+// 防抖窗口 1000 毫秒（设计 2.2 字面：窗口内多次调用合并为一次读改写）。
+export const LOG_DEBOUNCE_MS = 1000
+
+// 宿主内存队列默认 1000 条封顶（#558 队列口径：满时按级别丢弃，只计数不抛错）。
+export const DEFAULT_MAX_QUEUE = 1000
+
+// #21 轮转默认值：单文件超 5MB 立封（当日可写文件唯一），保留 14 天（含当日，按文件名里的日期）。
+export const DEFAULT_MAX_SIZE = 5 * 1024 * 1024
+
+export const DEFAULT_MAX_DAYS = 14
+
+// 客户端批量转发口径（#558 队列口径，宿主包内只存字面供客户端引擎票 #560 引用）：
+// 每批最多 50 条，每 1000 毫秒发一次，单包约 128KB 或队列 100 条先到先截，裁掉的记入丢弃数。
+export const CLIENT_BATCH_MAX = 50
+
+export const CLIENT_BATCH_INTERVAL_MS = 1000
+
+export const CLIENT_PACKET_BYTES = 128 * 1024
+
+export const CLIENT_QUEUE_MAX = 100
+
+// 兼容旧字面：插件标识为 wf 时，目录名与开关文件名与现状一字不差。
+export const LEGACY_LOG_DIR_NAME = 'logs'
+
+export const LEGACY_SWITCH_FILE_NAME = 'log-switch.json'
+
+// 宿主电话的 5 个动作名（#558 冻结：动作名不变，只许前缀参数化）。
+export const PHONE_ACTIONS = ['logBatch', 'logExport', 'logClear', 'logGetSwitch', 'logSetSwitch'] as const
+
+export type PhoneAction = (typeof PHONE_ACTIONS)[number]
+
+// 事件级别（沿用附录定版：错误与告警始终落盘，信息中常驻落盘，其余只在调试开关打开时落盘）。
+// 级别全表：单源在 core/level.ts（LOG_LEVEL_ORDER），这里只是公开别名——
+// 「哪些级别永不丢」的判定（isUrgentLevel 等）也读同一份表，不会出现两处不一致。
+export const EVENT_LEVELS = LOG_LEVEL_ORDER
+
+export type LogEventLevel = (typeof EVENT_LEVELS)[number]
+
+// 事件归类（只为计数检查服务，与级别是两回事：级别管落不落盘，归类管数对不对）。
+export const EVENT_KINDS = ['resident', 'ondemand', 'selfmon'] as const
+
+export type LogEventKind = (typeof EVENT_KINDS)[number]
+
+// 只读查询电话名单源（0.3.0 读侧：client.ts 与 phones.ts 均从此处导入，不再各手拼 prefix+'.logQuery'；
+// PHONE_ACTIONS 仍为冻结的 5 个，不新增动作名，已有“拼出 5 个”字面断言不受影响）。
+export const LOG_QUERY_ACTION_SUFFIX = 'logQuery'

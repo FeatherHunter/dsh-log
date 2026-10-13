@@ -1,0 +1,22 @@
+{
+  "event": "gh.exec",
+  "level": "info",
+  "kind": "resident",
+  "fields": [
+    "argv0",
+    "cwdHash",
+    "latencyMs",
+    "kind",
+    "exitCode"
+  ],
+  "codes": [
+    "H_CWD",
+    "B_TOKEN"
+  ],
+  "rules": [
+    "R_TOKEN_BEARER",
+    "R_GH_TOKEN"
+  ],
+  "approvedAt": "2026-10-11",
+  "source": "tests/eventList.test.mjs makeSample (#18 Q6)"
+}

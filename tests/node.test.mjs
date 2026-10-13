@@ -35,11 +35,26 @@ async function readLogText(cacheDir, dirName) {
 }
 
 describe('Node 程序入口：日志包能在独立 Node 程序里直接用', () => {
+  it('快捷入口 1 行可用：createQuickLog 只给目录即落盘（#19 默认入口）', async () => {
+    const mod = await freshNodeEntry()
+    assert.equal(typeof mod.createQuickLog, 'function')
+    const cacheDir = await makeCacheDir()
+    try {
+      const log = await mod.createQuickLog(cacheDir)
+      assert.equal(log.store.config.pluginId, 'quick')
+      log.store.log('warn', 'skill.step.fail', { step: 'quick' })
+      await log.ready
+      assert.match(await readLogText(cacheDir, 'logs-quick'), /"step":"quick"/)
+    } finally {
+      await rm(cacheDir, { recursive: true, force: true })
+    }
+  })
+
   it('三件事齐备：建库、写、等落盘', async () => {
     const mod = await freshNodeEntry()
     const cacheDir = await makeCacheDir()
     try {
-      const log = await mod.createNodeHostLog({ cacheDir }, { pluginId: 'probe-one' })
+      const log = await mod.createNodeHostLog({ cacheDir }, { pluginId: 'probe-one', prefix: 'probe-one' })
       assert.equal(typeof log.store.log, 'function')
       assert.equal(typeof log.store.isEnabled, 'function')
       assert.equal(typeof log.store.flush, 'function')
@@ -64,7 +79,7 @@ describe('Node 程序入口：日志包能在独立 Node 程序里直接用', ()
       // 故意摆上几个像「日志目录」的环境变量，看入口会不会偷偷跟着走。
       process.env.SKILLS_DB_PATH = otherDir
       process.env.DSH_LOG_DIR = otherDir
-      const log = await mod.createNodeHostLog({ cacheDir }, { pluginId: 'probe-two' })
+      const log = await mod.createNodeHostLog({ cacheDir }, { pluginId: 'probe-two', prefix: 'probe-two' })
       log.store.log('warn', 'skill.step.fail', { step: 'env' })
       await log.ready
       assert.match(await readLogText(cacheDir, 'logs-probe-two'), /"step":"env"/)
@@ -83,7 +98,7 @@ describe('Node 程序入口：日志包能在独立 Node 程序里直接用', ()
     const mod = await freshNodeEntry()
     const cacheDir = await makeCacheDir()
     try {
-      const log = await mod.createNodeHostLog({ cacheDir }, { pluginId: 'calorie' })
+      const log = await mod.createNodeHostLog({ cacheDir }, { pluginId: 'calorie', prefix: 'calorie' })
       assert.equal(log.store.config.logDirName, 'logs-calorie')
       assert.equal(log.store.config.switchFileName, 'log-switch-calorie.json')
       log.store.log('warn', 'skill.step.fail', { step: 'naming' })
@@ -100,9 +115,9 @@ describe('Node 程序入口：日志包能在独立 Node 程序里直接用', ()
     const base = await makeCacheDir()
     const nested = path.join(base, 'not-yet', 'deeper')
     try {
-      const log = await mod.createNodeHostLog({ cacheDir: nested }, { pluginId: 'probe-nested' })
+      const log = await mod.createNodeHostLog({ cacheDir: nested }, { pluginId: 'probe-nested', prefix: 'probe-nested' })
       log.store.log('warn', 'skill.step.fail', { step: 'nested' })
-      const setOut = await log.store.handleLogSetSwitch({ enabled: true, sampleRate: 1 })
+      const setOut = await log.store.handleLogSetSwitch({ enabled: true })
       await log.ready
       assert.equal(setOut.ok, true)
       const entries = await readdir(nested)
@@ -120,7 +135,7 @@ describe('Node 程序入口：日志包能在独立 Node 程序里直接用', ()
     const mod = await freshNodeEntry()
     const cacheDir = await makeCacheDir()
     try {
-      const first = await mod.createNodeHostLog({ cacheDir }, { pluginId: 'probe-level' })
+      const first = await mod.createNodeHostLog({ cacheDir }, { pluginId: 'probe-level', prefix: 'probe-level' })
       first.store.log('warn', 'skill.step.fail', { step: 'always' })
       first.store.log('info', 'skill.run.start', { step: 'before-switch' })
       await first.ready
@@ -128,12 +143,17 @@ describe('Node 程序入口：日志包能在独立 Node 程序里直接用', ()
       assert.match(textBefore, /"step":"always"/)
       assert.ok(!textBefore.includes('before-switch'), '开关没开时非常驻信息不应落盘')
 
-      await first.store.handleLogSetSwitch({ enabled: true, sampleRate: 1 })
+      await first.store.handleLogSetSwitch({ enabled: true })
 
       // 换一个进程（新实例）再写：开关应还在，信息这次要落盘。
-      const second = await mod.createNodeHostLog({ cacheDir }, { pluginId: 'probe-level' })
+      // 0.3.0 隔离口径（#19）：同一日志目录同时只许一个活跃写者，所以先让第一个实例收尾并交还目录
+      // （synced 等它真刷完、release 交还常驻持有），第二个实例才能接管同一目录——这正是「旧进程已退出」的等价写法。
+      await first.store.synced()
+      first.store.release()
+      const second = await mod.createNodeHostLog({ cacheDir }, { pluginId: 'probe-level', prefix: 'probe-level' })
       second.store.log('info', 'skill.run.start', { step: 'after-switch' })
       await second.ready
+      second.store.release()
       const textAfter = await readLogText(cacheDir, 'logs-probe-level')
       assert.match(textAfter, /"step":"after-switch"/)
     } finally {
@@ -145,7 +165,7 @@ describe('Node 程序入口：日志包能在独立 Node 程序里直接用', ()
     const mod = await freshNodeEntry()
     const cacheDir = await makeCacheDir()
     try {
-      const log = await mod.createNodeHostLog({ cacheDir }, { pluginId: 'probe-shape' })
+      const log = await mod.createNodeHostLog({ cacheDir }, { pluginId: 'probe-shape', prefix: 'probe-shape' })
       log.store.log('warn', 'skill.step.fail', { step: 'parse' })
       await log.ready
       const text = (await readLogText(cacheDir, 'logs-probe-shape')).trim().split('\n')
@@ -161,8 +181,8 @@ describe('Node 程序入口：日志包能在独立 Node 程序里直接用', ()
 
   it('不给目录直接报错，不猜位置', async () => {
     const mod = await freshNodeEntry()
-    await assert.rejects(() => mod.createNodeHostLog({}, { pluginId: 'probe' }), /cacheDir/)
-    await assert.rejects(() => mod.createNodeHostLog({ cacheDir: '' }, { pluginId: 'probe' }), /cacheDir/)
+    await assert.rejects(() => mod.createNodeHostLog({}, { pluginId: 'probe', prefix: 'probe' }), /cacheDir/)
+    await assert.rejects(() => mod.createNodeHostLog({ cacheDir: '' }, { pluginId: 'probe', prefix: 'probe' }), /cacheDir/)
   })
 
   it('文件服务的边角：读不存在的文件当空、删不存在的文件不报错、列不到目录当空', async () => {
@@ -194,7 +214,7 @@ describe('Node 程序入口：日志包能在独立 Node 程序里直接用', ()
       }
       const log = await mod.createNodeHostLog(
         { cacheDir, fs: broken },
-        { pluginId: 'probe-broken' }
+        { pluginId: 'probe-broken', prefix: 'probe-broken' }
       )
       assert.doesNotThrow(() => log.store.log('warn', 'skill.step.fail', { step: 'broken' }))
       await assert.doesNotReject(() => log.ready)

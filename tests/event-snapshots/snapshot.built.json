@@ -1,0 +1,14 @@
+{
+  "event": "snapshot.built",
+  "level": "info",
+  "kind": "resident",
+  "fields": [
+    "maps",
+    "issues",
+    "labels",
+    "fallback",
+    "latencyMs"
+  ],
+  "approvedAt": "2026-10-11",
+  "source": "tests/eventList.test.mjs makeSample (#18 Q6)"
+}

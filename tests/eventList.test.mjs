@@ -13,7 +13,7 @@ const PKG_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 
 const configUrl = pathToFileURL(path.join(PKG_DIR, 'dist', 'config.js')).href + '?x=' + Date.now()
 const config = await import(configUrl)
-const { parseEventListManifest, checkEventFields, checkEventCounts, resolveHostLogConfig } = config
+const { parseEventListManifest, checkEventFields, computeEventCounts, resolveHostLogConfig } = config
 const host = await import(pathToFileURL(path.join(PKG_DIR, 'dist', 'host.js')).href + '?x=' + Date.now())
 
 // 一份手写小清单：两常驻、一按需、一自监控，计数自报一致。
@@ -57,7 +57,9 @@ describe('事件清单格式与通用检查器（#561）', () => {
     const manifest = parseEventListManifest(JSON.parse(raw))
     assert.equal(manifest.version, 1)
     assert.deepEqual(Object.keys(manifest.events), [])
-    assert.deepEqual(checkEventCounts(manifest), { ok: true, problems: [] })
+    assert.deepEqual(computeEventCounts(manifest), { resident: 0, ondemand: 0, selfmon: 0 })
+    // #27 起 checkEventCounts 已删（自算值与自算值核对＝同义反复），这里顺带钉住它真的不在公共面上。
+    assert.equal(config.checkEventCounts, undefined)
   })
 
   it('白名单通过：清单里的事件配清单里的字段，全过', () => {
@@ -80,19 +82,19 @@ describe('事件清单格式与通用检查器（#561）', () => {
     assert.deepEqual(got, { ok: false, unknownEvent: true, unknownFields: [] })
   })
 
-  it('计数检查通过：三类实际条数与自报一致', () => {
+  it('计数自算：三类实际条数与清单一致，唯一真源是 computeEventCounts', () => {
     const manifest = parseEventListManifest(makeSample())
-    assert.deepEqual(checkEventCounts(manifest), { ok: true, problems: [] })
+    assert.deepEqual(computeEventCounts(manifest), { resident: 2, ondemand: 1, selfmon: 1 })
+    assert.deepEqual(manifest.counts, computeEventCounts(manifest))
   })
 
-  it('计数对不上被揪出：增删事件不同步改 counts 就红', () => {
+  it('计数自算恒过：输入 counts 忽略，输出恒为自算（#18 counts删除）', () => {
     const sample = makeSample()
     sample.counts.resident = 1
     const manifest = parseEventListManifest(sample)
-    const got = checkEventCounts(manifest)
-    assert.equal(got.ok, false)
-    assert.equal(got.problems.length, 1)
-    assert.match(got.problems[0], /resident/)
+    // 输入错数被忽略，自算为实际 2/1/1；唯一真源为 computeEventCounts。
+    assert.deepEqual(manifest.counts, { resident: 2, ondemand: 1, selfmon: 1 })
+    assert.deepEqual(manifest.counts, computeEventCounts(manifest))
   })
 
   it('非法形状直接报中文错：级别写错', () => {
@@ -112,14 +114,14 @@ describe('事件清单格式与通用检查器（#561）', () => {
   })
 
   it('默认 wf 配置 eventList 为 null：主路径零变化', () => {
-    const resolved = resolveHostLogConfig({ pluginId: 'wf' })
+    const resolved = resolveHostLogConfig({ pluginId: 'wf', prefix: 'wf' })
     assert.equal(resolved.eventList, null)
     assert.equal(resolved.prefix, 'wf')
     assert.equal(resolved.logDirName, 'logs')
   })
 
   it('合法对象进建库配置即收下可用：存下后检查器照跑', () => {
-    const resolved = resolveHostLogConfig({ pluginId: 'wf', eventList: makeSample() })
+    const resolved = resolveHostLogConfig({ pluginId: 'wf', prefix: 'wf', eventList: makeSample() })
     assert.equal(resolved.eventList.pluginId, 'wf')
     const got = checkEventFields(resolved.eventList, 'snapshot.built', ['maps', 'oops'])
     assert.deepEqual(got.unknownFields, ['oops'])
@@ -128,17 +130,22 @@ describe('事件清单格式与通用检查器（#561）', () => {
   it('非法对象进建库配置当场抛：不让坏清单溜进运行期', () => {
     const bad = makeSample()
     bad.events['gh.exec'].kind = 'always'
-    assert.throws(() => resolveHostLogConfig({ pluginId: 'wf', eventList: bad }), /kind 只许/)
+    assert.throws(() => resolveHostLogConfig({ pluginId: 'wf', prefix: 'wf', eventList: bad }), /kind 只许/)
   })
 
   it('数组形式进建库配置同样被拦下：只收对象，与坏对象同口径', () => {
-    assert.throws(() => resolveHostLogConfig({ pluginId: 'wf', eventList: [] }), /只收对象形式/)
+    assert.throws(() => resolveHostLogConfig({ pluginId: 'wf', prefix: 'wf', eventList: [] }), /只收对象形式/)
   })
 
-  it('宿主入口同样导出检查器：dsh-log/host 可达', () => {
+  it('宿主入口同样导出检查器：dsh-log/host 可达（#27 起不含已删的 checkEventCounts）', () => {
     assert.equal(typeof host.parseEventListManifest, 'function')
     assert.equal(typeof host.checkEventFields, 'function')
-    assert.equal(typeof host.checkEventCounts, 'function')
-    assert.deepEqual(checkEventCounts(host.parseEventListManifest(makeSample())), { ok: true, problems: [] })
+    assert.equal(typeof host.computeEventCounts, 'function')
+    assert.equal(host.checkEventCounts, undefined)
+    assert.deepEqual(host.computeEventCounts(host.parseEventListManifest(makeSample())), {
+      resident: 2,
+      ondemand: 1,
+      selfmon: 1
+    })
   })
 })

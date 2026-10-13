@@ -1,0 +1,10 @@
+export declare const DIR_LEASE_WAIT_MS = 200;
+export declare function normalizeLogDir(dir: unknown): string;
+export declare function dirConflictMessage(dir: string, noun?: string): string;
+type OtherHolderKind = '' | 'lease' | 'permanent';
+export declare function otherHolderKind(key: string, token: object): OtherHolderKind;
+export declare function takeDirHolder(key: string, token: object, permanent: boolean): void;
+export declare function dropDirHolder(key: string, token: object): void;
+export declare function dropPermanentHolder(key: string, token: object): void;
+export declare function waitForDirFree(key: string, token: object, budgetMs: number, later: (fn: () => void, ms: number) => unknown): Promise<boolean>;
+export {};

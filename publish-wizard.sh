@@ -188,22 +188,21 @@ finish() {
 # 一次发布走六段：体检 → 网页登录（扫码）→ 升版本 → 构建与干跑 → 真发布 → 发布后验证。
 #
 # Windows 上跑法（不要用 WSL 的 bash，路径会对不上）：
-#   "C:\Program Files\Git\bin\bash.exe" packages/dsh-log/publish-wizard.sh
+#   "C:\Program Files\Git\bin\bash.exe" publish-wizard.sh      # 在包根（本仓根目录）执行
 
 REGISTRY="https://registry.npmjs.org/"
 DRILL_FILE="notes-publish-drill.md"
 
-# 脚本放在包目录里，但可能在仓库根或包目录下被调起，这里自己找准包目录。
+# 脚本放在包目录里；此处兼容「包就在仓库根」（本仓现状）与「包在 packages/dsh-log 下」两种布局。
 _here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 if [[ -f "$_here/package.json" ]]; then
   PKG_DIR="$_here"
 elif [[ -f "$_here/packages/dsh-log/package.json" ]]; then
   PKG_DIR="$_here/packages/dsh-log"
 else
-  printf '%s\n' '找不到日志包目录（package.json），请在仓库根或 packages/dsh-log 下运行。'
+  printf '%s\n' '找不到日志包目录（package.json），请在包根或 packages/dsh-log 下运行。'
   exit 1
 fi
-ROOT_DIR=$(cd "$PKG_DIR/../.." && pwd)
 
 _pkg_field() {
   # 从包清单里取一个顶层字段的字符串值，不引第三方工具。

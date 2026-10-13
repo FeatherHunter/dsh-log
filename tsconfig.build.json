@@ -1,0 +1,20 @@
+{
+  // 声明产出专用配置（#27 发行面）：只出 .d.ts，不出 JS——JS 由 build.mjs 逐文件转译。
+  //
+  // 为什么与 tsconfig.json 分开：日常 typecheck 用 noEmit（最快、不落盘），
+  // 发布产物要的是 dist/ 下与 src/ 一一对应的 .d.ts（消费者 strict 编译才有类型可看）。
+  // 两个配置共享同一份 compilerOptions（extends），只是这里关掉 noEmit、打开 declaration。
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "declaration": true,
+    "emitDeclarationOnly": true,
+    // 只出声明，不出 sourcemap：包体小一半，且 dist 是入库产物，映射文件没地方放。
+    "declarationMap": false,
+    "sourceMap": false,
+    // rootDir 定死 src，声明树才与 src 同形（dist/config.d.ts 而不是 dist/src/config.d.ts）。
+    "rootDir": "src",
+    "outDir": "dist"
+  },
+  "include": ["src/**/*.ts"]
+}

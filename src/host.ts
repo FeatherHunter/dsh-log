@@ -9,8 +9,14 @@
 // 唯独记录电话的最外层例外原样保留（回成功加接收 0 条），不扩大。
 
 import {
+  buildLogQueryPhoneName,
   buildPhoneNames,
+  LOG_FORMAT_VERSION,
+  LOG_QUERY_ACTION_SUFFIX,
   type HostLogConfigInput,
+  type LintEventFieldsResult,
+  type LogRowV3,
+  type OnDropCallback,
   type PhoneAction,
   type PhoneNameMap,
   type ResolvedHostLogConfig
@@ -19,16 +25,28 @@ import { createLogStore, type LogStore, type LogStoreDeps } from './store.js'
 
 export { buildPhoneName, buildPhoneNames, resolveHostLogConfig } from './config.js'
 export type { HostLogConfigInput, PhoneAction, PhoneNameMap, ResolvedHostLogConfig } from './config.js'
+// 0.3.0 读侧转出口（#19：lint 三档、计数自算、落盘行版本、只读查询电话名单源经宿主入口可达）。
+export {
+  lintEventFields,
+  computeEventCounts,
+  LOG_FORMAT_VERSION,
+  buildLogQueryPhoneName,
+  LOG_QUERY_ACTION_SUFFIX,
+  parseLogFileName,
+  listLogFiles,
+  logFilesOfDate
+} from './config.js'
+export type { LintEventFieldsResult, LogFileInfo, LogRowV3, OnDropCallback } from './config.js'
 // 事件清单格式与通用检查器（#561，对象形式，日志包不读盘；经宿主入口转出口，dsh-log/host 可达）。
-export { parseEventListManifest, checkEventFields, checkEventCounts } from './config.js'
+// checkEventCounts 已在 0.3.0 #27 删除（自算值与自算值核对＝同义反复），数条数用 computeEventCounts。
+export { parseEventListManifest, checkEventFields } from './config.js'
 export type {
   LogEventLevel,
   LogEventKind,
   LogEventEntry,
   LogEventCounts,
   LogEventList,
-  EventFieldCheck,
-  EventCountCheck
+  EventFieldCheck
 } from './config.js'
 export {
   LOG_DEBOUNCE_MS,
@@ -39,6 +57,16 @@ export {
   createLogStore
 } from './store.js'
 export type { LogEntry, LogLevel, LogStore, LogStoreDeps } from './store.js'
+// #20 查时授权聚合（宿主侧）：逐实例问各自的只读查询电话，再按授权表合并成一页。
+// 每个实例只读自己的桶（读不穿桶），跨插件看只能经这一层且必须显式授权。
+export { aggregateLogQuery } from './phones.js'
+export type {
+  LogQueryArgs,
+  LogQueryAggregateResult,
+  LogQueryEntry,
+  LogQueryResult,
+  LogQuerySource
+} from './phones.js'
 
 export interface HostLog {
   store: LogStore
@@ -46,6 +74,10 @@ export interface HostLog {
 }
 
 // 建宿主日志：一次调用得到一个独立实例（内存队列、累计丢弃数、开关状态各自独立，互不串）。
+//
+// 双必填（#19 契约，已生效）：pluginId 与 prefix 均须显式传入，缺任一建库即抛中文错，
+// prefix 不再回退到 pluginId；'wf' 是保留命名空间（首个官方插件），新插件传自己的标识即自然隔离，
+// 电话名撞名直接抛，不覆盖旧的。
 export function createHostLog(deps: LogStoreDeps, configInput: HostLogConfigInput): HostLog {
   const store = createLogStore(deps, configInput)
   const phoneNames = buildPhoneNames(store.config.prefix)
@@ -58,8 +90,30 @@ export interface PhoneRegistry {
   set: (name: string, handler: (args: never) => Promise<unknown>) => void
 }
 
-// 把 5 个电话名注册进表：该名字已被注册则报错、不覆盖旧的。
+// 宿主侧电话动作全表（局部 6 项：5 个冻结动作 + 只读查询 logQuery）。
+//
+// 裁决依据（#19，2026-10-11 grep 定案）：config.ts 的 PHONE_ACTIONS 冻结 5 项不动
+// （#558 冻结：动作名不变，只许前缀参数化）；第 6 项取 config 的 LOG_QUERY_ACTION_SUFFIX
+// 单源（buildLogQueryPhoneName(prefix) 拼名，不手拼 prefix+'.logQuery'）。
+// 注册按同一张表走 6 个（#20 已接线：registerHostLogPhones 注册 5 个写侧动作 + 只读查询）；
+// 本表同时给名字派生与探针可见性用。
+export const HOST_LOG_PHONE_ACTIONS = [
+  'logBatch',
+  'logExport',
+  'logClear',
+  'logGetSwitch',
+  'logSetSwitch',
+  LOG_QUERY_ACTION_SUFFIX
+] as const
+export type HostLogPhoneAction = (typeof HOST_LOG_PHONE_ACTIONS)[number]
+
+// 把 6 个电话名注册进表：该名字已被注册则报错、不覆盖旧的。
 // 默认前缀 wf 只给当前插件用，第二个插件必须显式配自己的前缀后才能注册。
+//
+// 第 6 电话 logQuery（#20 接线完成）：实现在 phones.createLogPhones().handleLogQuery（读侧：denied/
+// traceChain/expired/当日保护），store.createLogStore 已透出 handleLogQuery，这里按
+// buildLogQueryPhoneName(store.config.prefix) 单源派生名字并注册；PHONE_ACTIONS 冻结 5 项不受影响，
+// 第 6 个名字不进 phoneNames（那份映射的键类型是冻结的 5 个动作），要用名字请调 buildLogQueryPhoneName。
 export function registerHostLogPhones(registry: PhoneRegistry, hostLog: HostLog): PhoneNameMap {
   const store = hostLog.store
   const handlers: Record<PhoneAction, (args: never) => Promise<unknown>> = {
@@ -77,5 +131,11 @@ export function registerHostLogPhones(registry: PhoneRegistry, hostLog: HostLog)
     }
     registry.set(name, handlers[action])
   }
+  // 第 6 个电话：只读查询（#20）。撞名同样报错、不覆盖旧的。
+  const queryName = buildLogQueryPhoneName(store.config.prefix)
+  if (registry.has(queryName)) {
+    throw new Error('[dsh-log] 电话名已被注册，不覆盖旧的：' + queryName)
+  }
+  registry.set(queryName, ((args: unknown) => store.handleLogQuery(args)) as (args: never) => Promise<unknown>)
   return hostLog.phoneNames
 }

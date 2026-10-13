@@ -12,16 +12,25 @@
 //
 // 用法：
 //   import { createNodeHostLog } from 'dsh-log/node'
-//   const log = await createNodeHostLog({ cacheDir: '/path/to/your/cache' })
+//   const log = await createNodeHostLog(
+//     { cacheDir: '/path/to/your/cache' },
+//     { pluginId: 'my-plugin', prefix: 'my-plugin' }   // 双必填：缺任一建库即抛中文错
+//   )
 //   log.store.log('warn', 'your.step.fail', { step: 'fetch', reason: 'timeout' })
 //   log.store.flush()
 //   await log.ready   // 短命程序：刷完等这一下，进程退出前日志才真的落盘
+//   log.store.release()  // 交还目录占用：同一目录的下一个实例才能接管
 
-import { readFile, readdir, mkdir, unlink, writeFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { readFile, readdir, mkdir } from 'node:fs/promises'
+import { realpathSync } from 'node:fs'
+import { join } from 'node:path'
+import { createNodeFileService } from './platform/fs-node.js'
+import { createNodeTimer } from './platform/timer-node.js'
+export { createNodeFileService } from './platform/fs-node.js'
+export { createNodeTimer } from './platform/timer-node.js'
 import { createHostLog } from './host.js'
 import type { HostLog } from './host.js'
-import { logFileNamePattern } from './config.js'
+import { parseLogFileName } from './config.js'
 import type { HostLogConfigInput, PhoneNameMap } from './config.js'
 import type { LogFileService, LogStore, LogStoreDeps, LogTimer } from './store.js'
 
@@ -40,67 +49,8 @@ export interface NodeCacheDirDeps {
   joinPath?: (...parts: string[]) => string
 }
 
-// 日志包按「目标对象」读写文件，Node 标准库按路径字符串读写，所以这里把路径装成一个薄对象。
-function resolvePath(pathStr: string): Promise<{ path: string }> {
-  return Promise.resolve({ path: String(pathStr) })
-}
-function targetPath(target: unknown): string {
-  if (target && typeof target === 'object' && typeof (target as { path?: unknown }).path === 'string') {
-    return (target as { path: string }).path
-  }
-  return String(target)
-}
-
-/**
- * 用 Node 标准库拼出日志包要的文件服务。
- *
- * 两个要点：写之前先建父目录（开关文件写在缓存根目录下，包不建它的父目录），
- * 以及不存在的文件读成空串而不是抛错（第一次运行时当天日志文件还不存在）。
- */
-export function createNodeFileService(): LogFileService {
-  return {
-    resolve: resolvePath,
-    async readText(target: unknown): Promise<string> {
-      try {
-        return await readFile(targetPath(target), 'utf8')
-      } catch (e) {
-        if (e && (e as { code?: string }).code === 'ENOENT') return ''
-        throw e
-      }
-    },
-    async writeText(target: unknown, text: string): Promise<void> {
-      const target2 = targetPath(target)
-      await mkdir(dirname(target2), { recursive: true })
-      await writeFile(target2, text, 'utf8')
-    },
-    async mkdir(dir: string): Promise<void> {
-      await mkdir(String(dir), { recursive: true })
-    },
-    async unlink(target: unknown): Promise<void> {
-      try {
-        await unlink(targetPath(target))
-      } catch (e) {
-        if (e && (e as { code?: string }).code === 'ENOENT') return
-        throw e
-      }
-    },
-    async listDir(target: unknown): Promise<string[]> {
-      try {
-        return await readdir(targetPath(target))
-      } catch (e) {
-        if (e && (e as { code?: string }).code === 'ENOENT') return []
-        throw e
-      }
-    }
-  }
-}
-
-/** 用 Node 的全局定时函数拼出日志包要的计时器形状。 */
-export function createNodeTimer(): LogTimer {
-  return {
-    timeout: (fn: (...args: unknown[]) => void, ms: number) => setTimeout(fn, ms)
-  }
-}
+// Node 适配器已下沉 platform/（S3）：createNodeFileService 在 platform/fs-node.ts、
+// createNodeTimer 在 platform/timer-node.ts；这里转出口，公开名与拆分前相同。
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => {
@@ -112,10 +62,10 @@ function delay(ms: number): Promise<void> {
 async function markerLanded(store: LogStore, cacheDir: string, marker: string): Promise<boolean> {
   try {
     const logDir = join(cacheDir, store.config.logDirName)
-    const pattern = logFileNamePattern(store.config)
     const names = await readdir(logDir)
     for (const name of names) {
-      if (!pattern.test(name)) continue
+      // 单源解析器：基准行可能落在已封存的分段里，用 daily 正则会漏掉（0.3.0 接缝修复）。
+      if (!parseLogFileName(store.config, name)) continue
       const text = await readFile(join(logDir, name), 'utf8')
       if (text.includes(`"event":"${marker}"`)) return true
     }
@@ -126,8 +76,24 @@ async function markerLanded(store: LogStore, cacheDir: string, marker: string): 
   }
 }
 
+// 目录键归一用的 realpath：拿不到（目录还不存在、权限不足、平台不支持）就退回原字符串，
+// 绝不让归一失败把建库挡下来——归一只影响「两个实例是否撞同一个键」，不影响真正写到哪。
+function realCacheDir(dir: string): string {
+  try {
+    return realpathSync.native(dir)
+  } catch (e) {
+    void e
+    return dir
+  }
+}
+
 /**
  * 给独立 Node 程序用的日志库：一次调用得到可用的落盘日志。
+ *
+ * 双必填（#19 契约，已生效）：pluginId 与 prefix 均须显式传入，缺任一建库即抛中文错，
+ * prefix 不再回退到 pluginId。
+ * 同目录隔离（#19 P0，已生效）：同一目录同时只许一个活跃写者——第二个实例建库当场抛中文错，
+ * 上一个实例 release() 之后才能接管同一目录（跨进程同目录不支持，隔离靠目录按 pluginId 派生）。
  *
  * 返回的对象里，store 是日志库本体（isEnabled / log / flush / getDroppedCount 等），
  * phoneNames 只是照标识派生出来的名字，本入口不注册电话、独立程序也用不着；
@@ -149,7 +115,11 @@ export async function createNodeHostLog(
   await mkdir(cacheDir, { recursive: true })
 
   const hostLog = createHostLog(
-    { fs, timer, getCacheDir: () => cacheDir, DEFAULT_CWD: cacheDir },
+    // syncCacheDir：这里是目录唯一同步可知的入口（cacheDir 是实参），传进去让「同目录第二个活跃写者」
+    // 在建库当场就抛中文错（#19 隔离，P0），赶在任何一行落盘之前判定；写完不释放的常驻占位由 release() 交还。
+    // realpath 先归一：同一目录的不同写法（`base`、`base/.`、符号链接）必须撞同一个键，
+    // 否则两个实例各拿一把锁去写同一个文件，后落盘的那次整篇快照会静默覆盖前一次。
+    { fs, timer, getCacheDir: () => cacheDir, syncCacheDir: realCacheDir(cacheDir), DEFAULT_CWD: cacheDir },
     configInput
   )
   const store = hostLog.store as LogStore & { flushNow?: () => Promise<void> }
@@ -192,4 +162,24 @@ export async function createNodeHostLog(
   })()
 
   return { store: hostLog.store, phoneNames: hostLog.phoneNames, ready }
+}
+
+/**
+ * 默认快捷入口（#19 P0 门）：一行可用的落盘日志。
+ *
+ * 依赖预设照抄本文件 createNodeHostLog 的拼装形状：文件服务走 Node 标准库实现
+ * （createNodeFileService）、计时器走全局定时函数（createNodeTimer）、目录拼接走
+ * node:path 的 join；调用方只给 cacheDir（必填，无默认、不读环境变量），其余全默认。
+ * pluginId 默认 'quick'（前缀默认等于插件标识，落点为 `<cacheDir>/logs-quick/`）。
+ *
+ * 用法（1 行可用）：
+ *   const log = await createQuickLog('/path/to/your/cache')
+ *   log.store.log('warn', 'your.step.fail', { step: 'fetch', reason: 'timeout' })
+ *   await log.ready
+ */
+export async function createQuickLog(
+  cacheDir: string,
+  pluginId = 'quick'
+): Promise<HostLog & { ready: Promise<void> }> {
+  return createNodeHostLog({ cacheDir: cacheDir }, { pluginId: pluginId, prefix: pluginId })
 }

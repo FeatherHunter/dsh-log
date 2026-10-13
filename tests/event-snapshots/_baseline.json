@@ -1,0 +1,13 @@
+{
+  "total": 4,
+  "threshold": 5,
+  "events": [
+    "chain.cache.miss",
+    "gh.exec",
+    "log.persist.fail",
+    "snapshot.built"
+  ],
+  "updatedAt": "2026-10-11",
+  "source": "tests/eventList.test.mjs makeSample (#18 Q6)",
+  "note": "事件总数基线：与当前清单事件数之差绝对值超 5 且 CHANGELOG 无说明即红，红的是“无 changelog”不是字段本身"
+}

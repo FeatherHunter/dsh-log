@@ -1,0 +1,15 @@
+{
+  "event": "log.persist.fail",
+  "level": "warn",
+  "kind": "selfmon",
+  "fields": [
+    "op",
+    "reason",
+    "dirHash"
+  ],
+  "codes": [
+    "H_CWD"
+  ],
+  "approvedAt": "2026-10-11",
+  "source": "tests/eventList.test.mjs makeSample (#18 Q6)"
+}

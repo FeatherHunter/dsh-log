@@ -1,0 +1,17 @@
+export declare const LOG_DEBOUNCE_MS = 1000;
+export declare const DEFAULT_MAX_QUEUE = 1000;
+export declare const DEFAULT_MAX_SIZE: number;
+export declare const DEFAULT_MAX_DAYS = 14;
+export declare const CLIENT_BATCH_MAX = 50;
+export declare const CLIENT_BATCH_INTERVAL_MS = 1000;
+export declare const CLIENT_PACKET_BYTES: number;
+export declare const CLIENT_QUEUE_MAX = 100;
+export declare const LEGACY_LOG_DIR_NAME = "logs";
+export declare const LEGACY_SWITCH_FILE_NAME = "log-switch.json";
+export declare const PHONE_ACTIONS: readonly ["logBatch", "logExport", "logClear", "logGetSwitch", "logSetSwitch"];
+export type PhoneAction = (typeof PHONE_ACTIONS)[number];
+export declare const EVENT_LEVELS: readonly ["error", "warn", "info", "debug"];
+export type LogEventLevel = (typeof EVENT_LEVELS)[number];
+export declare const EVENT_KINDS: readonly ["resident", "ondemand", "selfmon"];
+export type LogEventKind = (typeof EVENT_KINDS)[number];
+export declare const LOG_QUERY_ACTION_SUFFIX = "logQuery";

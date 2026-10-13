@@ -24,17 +24,32 @@
 
 import {
   assertPluginId,
+  buildLogQueryPhoneName,
   buildPhoneNames,
   CLIENT_BATCH_INTERVAL_MS,
   CLIENT_BATCH_MAX,
   CLIENT_PACKET_BYTES,
   CLIENT_QUEUE_MAX,
+  LOG_FORMAT_VERSION,
+  LOG_QUERY_ACTION_SUFFIX,
   parseEventListManifest,
   type PhoneAction,
   type PhoneNameMap
 } from './config.js'
+// S2 下沉（领域层）：短 id（traceId/spanId）与短指纹单源一份，与宿主侧共用同一算法。
+import { genHex, hash8 } from './core/ids.js'
+import { isKnownLevel, isUrgentLevel } from './core/level.js'
+import { findEvictableIndex, findTrimmableIndex } from './core/admission.js'
+import { relocateReservedFields, SHADOW_FIELD } from './core/trace.js'
+import { createSwitchCache } from './client/switch-cache.js'
+import { createTraceRig } from './client/trace.js'
+import { estimateBatchBytes, LOG_RETRY_BACKOFF_MS, LOG_RETRY_MAX_ATTEMPTS } from './client/transport.js'
+import { createSwitchOps } from './client/switch-ops.js'
+import { createForwardRig } from './client/forward.js'
+import { createSendRig } from './client/send.js'
+import { createWriteRig } from './client/write.js'
 
-export { buildPhoneName, buildPhoneNames } from './config.js'
+export { buildPhoneName, buildPhoneNames, LOG_QUERY_ACTION_SUFFIX, buildLogQueryPhoneName } from './config.js'
 export type { PhoneAction, PhoneNameMap } from './config.js'
 
 export const CLIENT_BATCH = {
@@ -52,61 +67,57 @@ export function buildClientPhoneNames(prefix: string): PhoneNameMap {
 // 计时器回退只用运行环境自带的全局函数，不引入任何 Node 或浏览器专属类型（与宿主 store.ts 同口径）。
 declare function setTimeout(fn: () => void, ms: number): unknown
 declare function clearTimeout(handle: unknown): void
+// 类型契约已下沉 client/types.ts（S6）：import 进来供本文件实现使用，再原样转出口，公共面一字不变。
+import type {
+  ClientHost,
+  ClientTimer,
+  ClientStorage,
+  ClientBroadcast,
+  ClientLogDeps,
+  ClientLogConfigInput,
+  ResolvedClientLogConfig,
+  ClientDebugSwitch,
+  ClientQueuedRow,
+  ClientSendResult,
+  ClientSwitchResult,
+  ClientSetSwitchResult,
+  TraceSource,
+  TraceState,
+  ChildCtx,
+  TraceWhy,
+  ClientLogFn,
+  LogQueryClientArgs,
+  ClientLog
+} from './client/types.js'
+export type {
+  ClientHost,
+  ClientTimer,
+  ClientStorage,
+  ClientBroadcast,
+  ClientLogDeps,
+  ClientLogConfigInput,
+  ResolvedClientLogConfig,
+  ClientDebugSwitch,
+  ClientQueuedRow,
+  ClientSendResult,
+  ClientSwitchResult,
+  ClientSetSwitchResult,
+  TraceSource,
+  TraceState,
+  ChildCtx,
+  TraceWhy,
+  ClientLogFn,
+  LogQueryClientArgs,
+  ClientLog
+} from './client/types.js'
 
-// ---- 四依赖的最小形状（调用方传入什么，本包就用什么，不自己抓全局） ----
 
-// 宿主调用器：只用 call 一个方法（转发一批、开关读写都走它）。
-export interface ClientHost {
-  call: (name: string, args?: unknown) => Promise<unknown>
-}
-
-// 计时器：只用 timeout 一个方法（防抖合并与看门狗都走它，没有就回退全局函数）。
-export interface ClientTimer {
-  timeout: (fn: () => void, ms: number) => unknown
-}
-
-// 本地存储：只用读写两个方法（开关持久化走它，没有就每次用默认）。
-export interface ClientStorage {
-  getItem: (key: string) => string | null
-  setItem: (key: string, value: string) => void
-}
-
-// 开关广播：开关落定后通知全组，一个无参函数（没有就不广播，不报错）。
-export type ClientBroadcast = () => void
-
-// 建日志器时调用方传入的四个依赖（全可选，缺了走退化路，不抛错）。
-export interface ClientLogDeps {
-  host?: ClientHost | null
-  timer?: ClientTimer | null
-  // 存储：传 storage 即够；旧闭包名 localStorage 也认（迁移期兼容，两者都传以 storage 为准）。
-  storage?: ClientStorage | null
-  localStorage?: ClientStorage | null
-  broadcastLogSwitch?: ClientBroadcast | null
-}
-
-// ---- 配置面（只收插件标识与前缀，批量口径与存储键沿现状不参数化） ----
-
-// 建日志器时调用方传入的配置：插件标识建议显式传，不传回退 wf（当前插件主路径，零变化）。
-export interface ClientLogConfigInput {
-  pluginId?: string
-  // 电话名前缀：不传时回退到插件标识（即前缀默认等于插件标识，当前插件两者都是 wf）。
-  prefix?: string
-  // 事件清单注入点位（与宿主同一口径：对象当场验形状，字符串只存不解析，默认 null 零变化；
-  // 客户端运行时不拿清单做字段拦截，检查跑在通用门禁里）。
-  eventList?: string | Record<string, unknown> | null
-}
-
-export interface ResolvedClientLogConfig {
-  pluginId: string
-  prefix: string
-  eventList: string | Record<string, unknown> | null
-}
-
-// 把调用方传入的配置补齐为完整配置（缺省全走 #558 默认派生，非法才抛错）。
-export function resolveClientLogConfig(input?: ClientLogConfigInput): ResolvedClientLogConfig {
-  const raw = input === undefined || input === null ? {} : input
-  const pluginId = raw.pluginId === undefined ? 'wf' : assertPluginId(raw.pluginId, '插件标识 pluginId')
-  const prefix = raw.prefix === undefined ? pluginId : assertPluginId(raw.prefix, '电话名前缀 prefix')
+// 把调用方传入的配置补齐为完整配置（#19 双必填：缺项不是编译期兜底，而是运行期抛中文错；
+// 入参取 Partial 是因为 JS 调用方可能传空对象，这里必须给出可执行的错误，而不是靠类型静默）。
+export function resolveClientLogConfig(input?: Partial<ClientLogConfigInput>): ResolvedClientLogConfig {
+  const raw: Partial<ClientLogConfigInput> = input === undefined || input === null ? {} : input
+  const pluginId = raw.pluginId !== undefined && raw.pluginId !== null ? assertPluginId(raw.pluginId, '插件标识 pluginId') : (function(): string { throw new Error('[dsh-log] 建客户端日志库缺少配置：插件标识 pluginId 必填（须显式传入，不再回退）') })()
+  const prefix = raw.prefix !== undefined && raw.prefix !== null ? assertPluginId(raw.prefix, '电话名前缀 prefix') : (function(): string { throw new Error('[dsh-log] 建客户端日志库缺少配置：电话名前缀 prefix 必填（须显式传入，不再回退到 pluginId）') })()
   const eventList = raw.eventList === undefined ? null : raw.eventList
   if (eventList !== null && typeof eventList === 'object') {
     // 对象形式的清单当场验形状（与宿主入口同一函数）；数组同样被拦下；默认 null 原样透过。
@@ -117,8 +128,17 @@ export function resolveClientLogConfig(input?: ClientLogConfigInput): ResolvedCl
 
 // ---- 旧字面兼容（批量口径数字复用 CLIENT_BATCH 常量，不另写一遍） ----
 
-// 本地开关存一份：键名与形状沿现状（是否开启加采样率加版本号），不动其他键。
+// 本地开关存一份：0.3.0 起按插件派生命名空间（#19+#20+#24 读侧，不兼容 0.2.x）。
+// 0.2.x 单键 'dsws.debug' 全插件共用（见 research/08-plugin-isolation.md 第 4 层）；
+// 0.3.0 起实际键为 `dsws.debug.<pluginId>`（config.pluginId），读写两处同改，读不到只用默认。
+// LOG_DEBUG_KEY 保留作前缀字面（文档锚点）；运行期请用 debugStorageKey(pluginId) 拿实际键。
+// 旧的 LOG_DEBUG_KEY_PREFIX 别名与 buildLogDebugKey 兼容别名已在 0.3.0 #27 删除（同物多名只制造分叉）。
 export const LOG_DEBUG_KEY = 'dsws.debug'
+// 按插件派生实际存储键（前缀默认等于插件标识时，键仍按插件标识派生，不按前缀）。
+export function debugStorageKey(pluginId: string): string {
+  return LOG_DEBUG_KEY + '.' + pluginId
+}
+// 只读查询电话名单源见 config.ts（LOG_QUERY_ACTION_SUFFIX/buildLogQueryPhoneName，本入口转出口供兼容）。
 // 通道批量口径（#558 队列口径）：每批最多 50 条、每 1000 毫秒发一次、
 // 单包约 128KB 或队列 100 条先到先截，裁掉的记入丢弃数。
 export const LOG_BATCH_MAX = CLIENT_BATCH_MAX
@@ -133,66 +153,6 @@ export const LOG_REV = 1
 export const LOG_LEVELS = ['error', 'warn', 'info', 'debug'] as const
 export type ClientLogLevel = (typeof LOG_LEVELS)[number]
 
-export interface ClientDebugSwitch {
-  enabled: boolean
-  sampleRate: number
-  rev: number
-}
-
-export interface ClientQueuedRow {
-  ts: number
-  level: string
-  event: string
-  fields: Record<string, unknown>
-  truncated?: boolean
-}
-
-export interface ClientSendResult {
-  ok: boolean
-  sent: number
-}
-
-export interface ClientSwitchResult {
-  ok: boolean
-  enabled: boolean
-  sampleRate: number
-}
-
-export interface ClientSetSwitchResult {
-  ok: boolean
-  enabled: boolean
-  sampleRate?: number
-  error?: string
-}
-
-// 日志器：工厂一次调用得到一个独立实例（内存队列、累计丢弃数、开关状态各自独立，互不串）。
-// 方法名与旧模块同名同参同语义，默认配置下行为零变化。
-export interface ClientLog {
-  config: ResolvedClientLogConfig
-  phoneNames: PhoneNameMap
-  // 下面四份状态是活引用（测试与调用处可直接读，改开关请走 setLogSwitch 与 reconcileLogSwitch）。
-  logSwitch: ClientDebugSwitch
-  logQueue: ClientQueuedRow[]
-  logDroppedState: { count: number }
-  logForwardState: { lastSummaryAt: number; lastSummaryDropped: number; lastReason: string }
-  logFlushTimer: { id: unknown }
-  isEnabled: (level: string) => boolean
-  log: (level: string, event: string, fields?: Record<string, unknown>) => void
-  scheduleLogFlush: (immediate: boolean) => void
-  estimateBatchBytes: (entries: ClientQueuedRow[]) => number
-  maybeForwardSummary: () => void
-  hash8: (value: unknown) => string
-  logExportFail: (op: string, reason: string, err: unknown) => void
-  watchSwitchOp: (op: string, pending: unknown) => void
-  sendLogBatch: () => Promise<ClientSendResult>
-  flush: () => { ok: boolean }
-  getDroppedCount: () => number
-  readLocalDebugSwitch: () => ClientDebugSwitch
-  persistLocalDebugSwitch: (state: ClientDebugSwitch) => boolean
-  reconcileLogSwitch: () => Promise<ClientSwitchResult>
-  setLogSwitch: (enabled: boolean, sampleRate?: number) => Promise<ClientSetSwitchResult>
-}
-
 // 建客户端日志器：四依赖全由调用方传入，返回日志器。
 // 文本拼接消费时，调用处把闭包里现成的 host、timer、localStorage、broadcastLogSwitch 四个名字原样传入即可。
 export function createClientLog(deps: ClientLogDeps, configInput?: ClientLogConfigInput): ClientLog {
@@ -204,44 +164,12 @@ export function createClientLog(deps: ClientLogDeps, configInput?: ClientLogConf
   // 配置：默认 wf（插件标识与前缀都是 wf），拼出的 5 个电话名与现状一字不差。
   const config = resolveClientLogConfig(configInput)
   const phoneNames = buildClientPhoneNames(config.prefix)
+  // 0.3.0 存储键：按插件派生 `dsws.debug.<pluginId>`（不按前缀；读不到只用默认）。
+  const debugKey = debugStorageKey(config.pluginId)
 
-  // 读本地开关（启动秒显用）：同步读本地存储，读不到或读坏都用默认（默认关闭）。
-  function readLocalDebugSwitch(): ClientDebugSwitch {
-    const fallback: ClientDebugSwitch = { enabled: false, sampleRate: 1, rev: LOG_REV }
-    try {
-      if (!storage || typeof storage.getItem !== 'function') return fallback
-      const raw = storage.getItem(LOG_DEBUG_KEY)
-      if (!raw) return fallback
-      const saved = JSON.parse(raw) as { enabled?: unknown; sampleRate?: unknown; rev?: unknown } | null
-      if (!saved || typeof saved !== 'object') return fallback
-      return {
-        enabled: saved.enabled === true,
-        sampleRate: typeof saved.sampleRate === 'number' && isFinite(saved.sampleRate) ? saved.sampleRate : 1,
-        rev: typeof saved.rev === 'number' && isFinite(saved.rev) ? saved.rev : LOG_REV
-      }
-    } catch (e) {
-      void e
-      return fallback
-    }
-  }
-  // 写本地开关：全文覆写，失败不抛错，返回是否写成功。
-  function persistLocalDebugSwitch(state: ClientDebugSwitch): boolean {
-    try {
-      if (!storage || typeof storage.setItem !== 'function') return false
-      storage.setItem(
-        LOG_DEBUG_KEY,
-        JSON.stringify({
-          enabled: !!(state && state.enabled),
-          sampleRate: state && typeof state.sampleRate === 'number' && isFinite(state.sampleRate) ? state.sampleRate : 1,
-          rev: state && typeof state.rev === 'number' && isFinite(state.rev) ? state.rev : LOG_REV
-        })
-      )
-      return true
-    } catch (e) {
-      void e
-      return false
-    }
-  }
+  const switchCache = createSwitchCache({ storage: storage, debugKey: debugKey, rev: LOG_REV })
+  const readLocalDebugSwitch = (): ClientDebugSwitch => switchCache.read()
+  const persistLocalDebugSwitch = (state: ClientDebugSwitch): boolean => switchCache.persist(state)
   // 开关内存值：建日志器时同步读本地，界面秒显不等待宿主；随后启动对账再向宿主看齐。
   const logSwitch: ClientDebugSwitch = readLocalDebugSwitch()
   // 内存批量队列：调用处只进队列就返回，不等转发完成；转发走宿主记录电话。
@@ -249,409 +177,188 @@ export function createClientLog(deps: ClientLogDeps, configInput?: ClientLogConf
   // 累计丢弃数：队列满丢弃、超包裁剪、转发失败都只计数不抛错。
   const logDroppedState = { count: 0 }
   // 转发汇总状态：只记上次汇总位置与最近一次丢弃原因，汇总行本身不逐条。
-  const logForwardState = { lastSummaryAt: 0, lastSummaryDropped: 0, lastReason: '' }
+  const logForwardState = {
+    lastSummaryAt: 0,
+    lastSummaryDropped: 0,
+    lastReason: '',
+    // 宿主最近一次回包里的三档计数（-1＝这一档宿主没说，汇总行不写这个键）。
+    lastAccepted: -1,
+    lastSkipped: -1,
+    lastRejected: -1
+  }
+  // 失败重试位（0.3.0 Track 1）：宿主不可用 / 宿主拒收 / 发送抛错时，整批先放这里重试，不立刻判死。
+  // 为什么必须有：原来这三条路都是「失败整批记丢弃、不等待不重试」——客户端到宿主这一段一断，
+  // error 行就静默消失，直接违反「error 永不丢」。重试有界（次数上限 + 只留一批，天然有界），
+  // 到顶才如实计数；rejectCount 记「宿主说它不要了几行」，给最终计数用（一行被拒不该报成整批丢）。
+  const logRetryState: { rows: ClientQueuedRow[]; rejectCount: number; attempts: number; timer: unknown } = {
+    rows: [],
+    rejectCount: -1,
+    attempts: 0,
+    timer: null
+  }
+  
+  
+  // 与 scheduleLogFlush 里的 later 同口径：优先用注入的计时器，没有就退回全局 setTimeout。
+  function laterRun(fn: () => void, ms: number): unknown {
+    try {
+      if (timer !== null && timer !== undefined && typeof timer.timeout === 'function') return timer.timeout(fn, ms)
+    } catch (e) {
+      void e
+    }
+    return setTimeout(fn, ms)
+  }
   const logFlushTimer: { id: unknown } = { id: null }
   // 写开关代际：调用 hang 住时超时放行，迟到回包按代际丢弃，不碰状态、不记新行。
   const setLogSwitchGen = { n: 0 }
+  // 追踪状态（0.3.0 #20+#24 写侧：显式继承 + 自动建链占位；另一路 store.ts 只管落盘形状）。
+  const traceState: TraceState = { traceId: null, spanId: null, seq: 0, traceSource: 'none', spanSource: 'none', shadowWarns: 0 }
+
+  const trace = createTraceRig({ state: traceState })
+  const ensureSpanId = (): string => trace.ensureSpanId()
+  const ensureTraceForLevel = (level: string): string | null => trace.ensureForLevel(level)
 
   // 常驻事件（#731 一次性修好：信息级里标为常驻的那批，开关关着也转发）。
   // 为什么与宿主包用同一张表：两端放行口径必须一致，否则客户端拦掉的行宿主永远收不到；
   // 名单与 research/489-appendix.md 第 1 章常驻 43 条一致，测试会拿附录逐项核对。
   // （#782 补记：#746 的 naming.summary 落地时漏了这里四处名单，本票一并补进，另加新事件 cwd.persisted。
   //   2026-10-04 #817 补记：版本管理宿主侧 git 适配器的两条常驻事件 git.exec 与 git.exec.fail
-  //   同日补进四处名单，常驻数由 41 变 43。）
-  const RESIDENT_EVENTS: ReadonlySet<string> = new Set([
-    'snapshot.request', 'snapshot.cache.miss', 'repo.resolve.tier', 'gh.exec',
-    'gh.timeout', 'gh.resolve.fail', 'graphql.fallback', 'issues.fallback',
-    'snapshot.built', 'panelSync.dirty', 'registry.select', 'detection.detect',
-    'skill.probe', 'skill.pending.cap', 'host.call', 'host.call.fail',
-    'snapshot.hydrate', 'backend.switch', 'naming.guard', 'naming.lock',
-    'panel.open', 'statusbar.fallback', 'dock.rehydrate', 'storage.fail',
-    'chain.derive.error', 'fallback.chain', 'client.snapshot.miss', 'host.start',
-    'update.install.exec', 'labelColors.write', 'guide.inject', 'healthCheck.inject',
-    'choiceStore.file.bad', 'choiceStore.write.fail', 'issues.page', 'sessionTickets.chain',
-    'chain.backoff', 'host.dispatch.empty', 'naming.summary', 'cwd.persisted',
-    'update.install.manifestSync',
-    'git.exec', 'git.exec.fail',
-  ])
-  // 读当前级别与事件名是否允许产生日志；关闭时调用处直接返回。错误与告警始终允许；
-  // 信息级里落在常驻名单的也始终允许（#731 根因：从前只看级别，常驻信息全被开关拦掉）。
-  function isEnabled(level: string, event?: string): boolean {
-    if (level === 'error' || level === 'warn') return true
+  // 主写路径已下沉 client/write.ts（S6）：留同名包装，调用点一字不改。
+  // 发送面在写路径之后建立，用一次性转发解环（调用都发生在运行期，建库期不自杀）。
+  let sendBatchRef: () => Promise<ClientSendResult> = () => Promise.resolve({ ok: false, sent: 0 })
+  const write = createWriteRig({
+    getSwitchEnabled: () => logSwitch.enabled,
+    queue: logQueue,
+    dropped: logDroppedState,
+    forward: logForwardState,
+    flushTimer: logFlushTimer,
+    traceState: traceState,
+    ensureSpanId: ensureSpanId,
+    ensureTraceForLevel: ensureTraceForLevel,
+    sendLogBatch: () => sendBatchRef(),
+    timer: timer
+  })
+  const log = (level: string, event: string, fields?: Record<string, unknown>): void => write.log(level, event, fields)
+  const isEnabled = (level: string, event?: string): boolean => write.isEnabled(level, event)
+  const dropForRoom = (level: string): void => write.dropForRoom(level)
+  const scheduleLogFlush = (immediate: boolean): void => write.scheduleLogFlush(immediate)
+
+
+  // 转发面自监控已下沉 client/forward.ts（S6）：留同名包装，调用点一字不改。
+  const forward = createForwardRig({
+    log: log,
+    dropped: logDroppedState,
+    forward: logForwardState,
+    timer: timer,
+    watchdogMs: LOG_WATCHDOG_MS,
+    hashFn: input && typeof input.hashFn === 'function' ? input.hashFn : null
+  })
+  const maybeForwardSummary = (): void => forward.maybeForwardSummary()
+  const logExportFail = (op: string, reason: string, err: unknown): void => forward.logExportFail(op, reason, err)
+  const watchSwitchOp = (op: string, pending: unknown): void => forward.watchSwitchOp(op, pending)
+
+  // 发送面已下沉 client/send.ts（S6）：留同名包装，调用点一字不改。
+  const send = createSendRig({
+    host: host,
+    phoneNames: phoneNames,
+    queue: logQueue,
+    retry: logRetryState,
+    dropped: logDroppedState,
+    forward: logForwardState,
+    flushTimer: logFlushTimer,
+    timer: timer,
+    log: log,
+    laterRun: laterRun,
+    maybeForwardSummary: maybeForwardSummary,
+    scheduleLogFlush: scheduleLogFlush
+  })
+  const sendLogBatch = (): Promise<ClientSendResult> => send.sendLogBatch()
+  const flush = (): { ok: boolean } => send.flush()
+  const getDroppedCount = (): number => send.getDroppedCount()
+  sendBatchRef = sendLogBatch
+
+  // 开关对账与保存已下沉 client/switch-ops.ts（S6）：下面留同名包装，调用点一字不改。
+  const switchOps = createSwitchOps({
+    host: host,
+    phoneNames: phoneNames,
+    timer: timer,
+    watchdogMs: LOG_WATCHDOG_MS,
+    state: logSwitch,
+    gen: setLogSwitchGen,
+    cache: switchCache,
+    broadcast: broadcast,
+    log: log,
+    watch: watchSwitchOp
+  })
+  const reconcileLogSwitch = (): Promise<ClientSwitchResult> => switchOps.reconcile()
+  const setLogSwitch = (enabled: boolean): Promise<ClientSetSwitchResult> => switchOps.set(enabled)
+
+
+  // 追踪：log.child(ctx) 显式继承（继承 traceId、刷新 spanId、子实例 seq 从 0）。
+  // 独立子实例（队列与开关各自独立，traceId 靠字段透传在宿主侧汇合，查询按 traceId 串链）。
+  function child(ctx?: ChildCtx): ClientLog {
+    const next = createClientLog(input, { pluginId: config.pluginId, prefix: config.prefix, eventList: config.eventList })
     try {
-      if (typeof event === 'string' && RESIDENT_EVENTS.has(event)) return true
-      return logSwitch.enabled === true
-    } catch (e) {
-      void e
-      return false
-    }
-  }
-  // 记一行日志：体内仍先判断一次再写，做漏加外层判断的兜底；
-  // 但兜底拦不住调用前已求值的拼接，所以高频调用处仍必须写外层判断，不许省略。
-  function log(level: string, event: string, fields?: Record<string, unknown>): void {
-    if (!isEnabled(level, event)) return
-    if (logQueue.length >= LOG_QUEUE_MAX) {
-      logDroppedState.count += 1
-      logForwardState.lastReason = 'queue-full'
-      return
-    }
-    logQueue.push({
-      ts: Date.now(),
-      level: level,
-      event: String(event || ''),
-      fields: fields && typeof fields === 'object' ? fields : {}
-    })
-    if (level === 'error' || level === 'warn') scheduleLogFlush(true)
-    else scheduleLogFlush(false)
-  }
-  // 安排一次转发：普通走 1000 毫秒防抖合并；错误与告警走直通（取消本次等待立刻发，
-  // 但调用处仍只进队列就返回，不等转发完成，崩溃窗口只剩毫秒级）。
-  function scheduleLogFlush(immediate: boolean): void {
-    const later = function (fn: () => void, ms: number): unknown {
-      try {
-        if (timer !== null && timer !== undefined && typeof timer.timeout === 'function') return timer.timeout(fn, ms)
-      } catch (e) {
-        void e
+      let tid: string | null = null
+      let tsrc: TraceSource = 'none'
+      const c = ctx as Record<string, unknown> | null | undefined
+      if (c && typeof c === 'object' && typeof c.traceId === 'string' && (c.traceId as string)) {
+        tid = c.traceId as string
+        tsrc = 'explicit'
+      } else if (traceState.traceId) {
+        tid = traceState.traceId
+        tsrc = 'inherited'
       }
-      return setTimeout(fn, ms)
-    }
-    if (immediate) {
-      if (logFlushTimer.id !== null) {
-        try {
-          clearTimeout(logFlushTimer.id)
-        } catch (e) {
-          void e
-        }
-        logFlushTimer.id = null
-      }
-      later(sendLogBatch, 0)
-      return
-    }
-    if (logFlushTimer.id !== null) return
-    logFlushTimer.id = later(function () {
-      logFlushTimer.id = null
-      sendLogBatch()
-    }, LOG_FLUSH_MS)
-  }
-  // 估算一次转发的包体积（只在转发时做，渲染路径不做对象转文本）。
-  function estimateBatchBytes(entries: ClientQueuedRow[]): number {
-    try {
-      const text = JSON.stringify(entries)
-      const g = globalThis as { TextEncoder?: new () => { encode: (value: string) => { length: number } } }
-      if (typeof g.TextEncoder !== 'undefined') return new g.TextEncoder().encode(text).length
-      return String(text).length
-    } catch (e) {
-      void e
-      return LOG_PACKET_BYTES + 1
-    }
-  }
-  // 转发汇总行：批量发送落定后，有新增丢弃才记一行；无丢弃的窗口不打扰。
-  // 汇总行本身走告警直通再触发下一次发送，下一次无新增丢弃即止，链条自然终止。
-  function maybeForwardSummary(): void {
-    const delta = logDroppedState.count - logForwardState.lastSummaryDropped
-    if (delta <= 0) return
-    logForwardState.lastSummaryDropped = logDroppedState.count
-    const now = Date.now()
-    const windowMs = now - logForwardState.lastSummaryAt
-    logForwardState.lastSummaryAt = now
-    try {
-      log('warn', 'log.forward.summary', {
-        droppedDelta: delta,
-        totalDropped: logDroppedState.count,
-        reason: logForwardState.lastReason || 'send-fail',
-        windowMs: windowMs
-      })
+      next.traceState.traceId = tid
+      next.traceState.traceSource = tsrc
+      next.traceState.spanId = genHex(8)
+      next.traceState.spanSource = 'refreshed'
+      next.traceState.seq = 0
     } catch (e) {
       void e
     }
+    return next
   }
-  // 散列小函数（纯散列不记原文；旧模块自带，包内保留一份，不依赖消费方闭包）。
-  function hash8(value: unknown): string {
-    try {
-      const t = String(value || '')
-      let h = 5381
-      for (let i = 0; i < t.length; i++) h = (((h << 5) + h + t.charCodeAt(i)) >>> 0)
-      return ('0000000' + h.toString(16)).slice(-8)
-    } catch (e) {
-      void e
-      return '00000000'
-    }
-  }
-  // 导出链路行：状态栏菜单与设置页两处复用；成功路径不调用，失败分支才记一行。
-  // 旧模块在消费方闭包里有散列与截断可用时优先用它们；包内没有共享闭包，
-  // 所以只认挂在全局上的同名函数（测试桩走这条），没有就回退包内散列，行为一致。
-  function logExportFail(op: string, reason: string, err: unknown): void {
-    try {
-      const g = globalThis as { dswsLogHash?: unknown; dswsLogTrunc?: unknown }
-      if (typeof g.dswsLogHash === 'function' && typeof g.dswsLogTrunc === 'function') {
-        const trunc = g.dswsLogTrunc as (value: string, n: number, field: string) => string
-        const hash = g.dswsLogHash as (value: string) => string
-        const raw = err && typeof err === 'object' && 'message' in (err as Record<string, unknown>)
-          ? String((err as { message?: unknown }).message)
-          : String(err || reason)
-        log('warn', 'log.export.fail', { op: op, reason: reason, errorHash: hash(trunc(raw, 120, 'error')) })
-      } else {
-        const raw = err && typeof err === 'object' && 'message' in (err as Record<string, unknown>)
-          ? String((err as { message?: unknown }).message)
-          : String(err || reason)
-        log('warn', 'log.export.fail', { op: op, reason: reason, errorHash: hash8(raw) })
-      }
-    } catch (e) {
-      void e
+  // 追踪：log.why() 解释三来源（traceId 的 explicit/inherited/auto 三处来历 + span/seq 说明）。
+  function why(): TraceWhy {
+    const detail =
+      'traceId 来源=' + traceState.traceSource +
+      '（explicit=child(ctx)显式传入，inherited=从父实例继承，auto=缺链自动建链仅info以上+采样后debug，none=尚未建链）；' +
+      'spanId 来源=' + traceState.spanSource + '（child 每次刷新，首链自动生成）；' +
+      'seq=' + String(traceState.seq) + '（本实例内单调，子实例从0，按(seq,ts)排链）；' +
+      '保留字冲突_shadow 计' + String(traceState.shadowWarns) + '次（traceId/spanId/seq 永不拒收，error 照落）；' +
+      '旧行 v!=' + String(LOG_FORMAT_VERSION) + ' 跳过计数不抛（读侧 handleLogQuery）'
+    return {
+      traceId: traceState.traceId,
+      spanId: traceState.spanId,
+      seq: traceState.seq,
+      sources: { traceId: traceState.traceSource, spanId: traceState.spanSource, seq: 'per-instance' },
+      shadowWarns: traceState.shadowWarns,
+      detail: detail
     }
   }
-  // 开关看门狗：操作与 5 秒计时竞跑，计时先到记一行告警；原调用不取消、不重试、不改返回值。
-  function watchSwitchOp(op: string, pending: unknown): void {
-    let settled = false
-    try {
-      if (pending && typeof (pending as Promise<unknown>).then === 'function') {
-        ;(pending as Promise<unknown>).then(
-          function () {
-            settled = true
-          },
-          function () {
-            settled = true
-          }
-        )
-      }
-    } catch (e) {
-      void e
-    }
-    const fire = function (): void {
-      if (!settled) {
-        settled = true
-        try {
-          log('warn', 'log.switch.watchdog', { op: op, timeoutMs: LOG_WATCHDOG_MS, stage: 'waiting-host' })
-        } catch (e) {
-          void e
-        }
-      }
-    }
-    try {
-      if (timer !== null && timer !== undefined && typeof timer.timeout === 'function') {
-        timer.timeout(fire, LOG_WATCHDOG_MS)
-        return
-      }
-    } catch (e) {
-      void e
-    }
-    try {
-      setTimeout(fire, LOG_WATCHDOG_MS)
-    } catch (e2) {
-      void e2
-    }
-  }
-  // 发一批：一次最多 50 条；单包超 128KB 或队列超 100 条时先到先截，
-  // 裁掉的记入丢弃数并在包尾最后一条记截断标记；失败整批记丢弃，不等待不重试。
-  function sendLogBatch(): Promise<ClientSendResult> {
-    if (logQueue.length === 0) return Promise.resolve({ ok: true, sent: 0 })
-    const entries = logQueue.splice(0, LOG_BATCH_MAX)
-    let trimmed = 0
-    while (entries.length > 1 && estimateBatchBytes(entries) > LOG_PACKET_BYTES) {
-      entries.pop()
-      trimmed += 1
-    }
-    // 队列里还压着超过 100 条说明消费跟不上：只留 100 条，其余丢弃并计数（不无界缓冲）。
-    while (logQueue.length > LOG_QUEUE_MAX) {
-      logQueue.shift()
-      trimmed += 1
-    }
-    if (trimmed > 0) {
-      logDroppedState.count += trimmed
-      logForwardState.lastReason = 'packet-trim'
-      try {
-        entries[entries.length - 1].truncated = true
-      } catch (e) {
-        void e
-      }
-    }
-    const args = { entries: entries, droppedCount: logDroppedState.count }
-    // 防自激：这一批如果只剩上一行汇总自己，失败只计数不再记新汇总，否则汇总会自己养活自己停不下来。
-    const onlySummary = entries.length === 1 && entries[0] && entries[0].event === 'log.forward.summary'
+  // 只读查询透传（电话名单源见 config.ts buildLogQueryPhoneName）。
+  function queryLogs(args?: LogQueryClientArgs): Promise<unknown> {
+    const name = buildLogQueryPhoneName(config.prefix)
     if (!host || typeof host.call !== 'function') {
-      logDroppedState.count += entries.length
-      logForwardState.lastReason = 'send-fail'
-      if (!onlySummary) maybeForwardSummary()
-      return Promise.resolve({ ok: false, sent: 0 })
+      return Promise.resolve({ ok: false, entries: [], error: 'host-unavailable' })
     }
     try {
-      return host
-        .call(phoneNames.logBatch, args)
-        .then(function (res: unknown) {
-          const ok = !!res && typeof res === 'object' && (res as { ok?: unknown }).ok === true
-          if (!ok) {
-            logDroppedState.count += entries.length
-            logForwardState.lastReason = 'host-reject'
-          }
-          if (ok) maybeForwardSummary()
-          else if (!onlySummary) maybeForwardSummary()
-          return { ok: ok, sent: entries.length }
-        })
-        .catch(function () {
-          logDroppedState.count += entries.length
-          logForwardState.lastReason = 'send-fail'
-          if (!onlySummary) maybeForwardSummary()
-          return { ok: false, sent: 0 }
-        })
-    } catch (e) {
-      void e
-      logDroppedState.count += entries.length
-      logForwardState.lastReason = 'send-fail'
-      if (!onlySummary) maybeForwardSummary()
-      return Promise.resolve({ ok: false, sent: 0 })
-    }
-  }
-  // 立刻转发一次（取消本次防抖等待）；客户端侧的 flush 只管转发，不管落盘。
-  function flush(): { ok: boolean } {
-    if (logFlushTimer.id !== null) {
-      try {
-        clearTimeout(logFlushTimer.id)
-      } catch (e) {
+      return (host.call(name, (args || {}) as unknown) as Promise<unknown>).catch(function (e: unknown) {
         void e
-      }
-      logFlushTimer.id = null
-    }
-    try {
-      sendLogBatch()
-    } catch (e) {
-      void e
-    }
-    return { ok: true }
-  }
-  // 读累计丢弃数（队列满与转发失败都只计数不抛错，与宿主同名同参）。
-  function getDroppedCount(): number {
-    return logDroppedState.count
-  }
-  // 启动对账：向宿主读开关，以宿主为准；宿主不可用或读失败就保持本地值，
-  // 不回退为开启，不抛错，不产生调试日志。成功后持久化到本地并向全组广播。
-  function reconcileLogSwitch(): Promise<ClientSwitchResult> {
-    if (!host || typeof host.call !== 'function') {
-      return Promise.resolve({ ok: false, enabled: logSwitch.enabled, sampleRate: logSwitch.sampleRate })
-    }
-    try {
-      const pendingGet = host.call(phoneNames.logGetSwitch, {})
-      watchSwitchOp('reconcile', pendingGet)
-      return (pendingGet as Promise<unknown>).then(function (res: unknown) {
-        const body = res && typeof res === 'object' ? (res as { ok?: unknown; enabled?: unknown; sampleRate?: unknown }) : null
-        if (!body || body.ok !== true) return { ok: false, enabled: logSwitch.enabled, sampleRate: logSwitch.sampleRate }
-        logSwitch.enabled = body.enabled === true
-        if (typeof body.sampleRate === 'number' && isFinite(body.sampleRate)) logSwitch.sampleRate = body.sampleRate
-        persistLocalDebugSwitch(logSwitch)
-        try {
-          if (broadcast) broadcast()
-        } catch (e) {
-          void e
-        }
-        return { ok: true, enabled: logSwitch.enabled, sampleRate: logSwitch.sampleRate }
-      }).catch(function () {
-        return { ok: false, enabled: logSwitch.enabled, sampleRate: logSwitch.sampleRate }
+        return { ok: false, entries: [] }
       })
     } catch (e) {
       void e
-      return Promise.resolve({ ok: false, enabled: logSwitch.enabled, sampleRate: logSwitch.sampleRate })
+      return Promise.resolve({ ok: false, entries: [] })
     }
   }
-  // 开关写失败分类行：写开关是低频用户动作，三条失败路各落一条告警行。
-  // 复用现成常驻事件 host.call.fail（不新增事件名），字段只用白名单三键；
-  // 告警级始终落盘、不依赖调试开关，下次导出日志即可看出是哪一类失败。
-  const logSwitchSetFail = function (kind: string, hint: unknown): void {
-    try {
-      log('warn', 'host.call.fail', {
-        method: phoneNames.logSetSwitch,
-        kind: 'set-switch-' + kind,
-        errorHash: hash8(String(hint === undefined || hint === null ? kind : hint).slice(0, 120))
-      })
-    } catch (e) {
-      void e
-    }
-  }
-  // 调用抛错再按文案分一小类：未知端点与连接不可用各单列，其余归通用抛错。
-  // 只做归类、不记原文（原文只进散列），低频路径、关闭时零代价。
-  const switchThrowKind = function (e: unknown): string {
-    const msg = String((e && typeof e === 'object' && ('code' in (e as Record<string, unknown>) || 'message' in (e as Record<string, unknown>))
-      ? ((e as { code?: unknown; message?: unknown }).code || (e as { message?: unknown }).message)
-      : e) || '')
-    if (/unknown endpoint/i.test(msg)) return 'throw-unknown-endpoint'
-    if (/connection|host\.call 不可用|unavailable/i.test(msg)) return 'throw-connection'
-    return 'throw'
-  }
-  // 调用抛错这条路：先落一条分类告警行，再把同一个分类码当返回值交给界面。
-  // 界面拿分类码翻成「是哪一类失败」的提示（#597 期望 2：别再只给一句笼统的保存失败）；
-  // 错误原文只进散列、不落盘也不上屏。
-  const failByThrow = function (e: unknown): string {
-    const kind = switchThrowKind(e)
-    logSwitchSetFail(
-      kind,
-      (e && typeof e === 'object' && 'message' in (e as Record<string, unknown>)
-        ? (e as { message?: unknown }).message
-        : undefined) || e
-    )
-    return kind
-  }
-  // 设置页保存开关：先写宿主，宿主生效才更新本地与内存并广播；写失败保持本地旧值并返回失败，
-  // 由调用处提示用户，不回退为开启。失败原因只给机器码——host-unavailable、host-rejected、
-  // switch-timeout、stale、throw / throw-connection / throw-unknown-endpoint；
-  // 面向用户的文案由界面批次经多语言系统转换，本包不写面向用户的中文字符串。
-  function setLogSwitch(enabled: boolean, sampleRate?: number): Promise<ClientSetSwitchResult> {
-    const next = {
-      enabled: enabled === true,
-      sampleRate: typeof sampleRate === 'number' && isFinite(sampleRate) ? sampleRate : logSwitch.sampleRate
-    }
-    if (!host || typeof host.call !== 'function') {
-      logSwitchSetFail('host-unavailable', 'host-unavailable')
-      return Promise.resolve({ ok: false, enabled: logSwitch.enabled, error: 'host-unavailable' })
-    }
-    try {
-      const pendingSet = host.call(phoneNames.logSetSwitch, next) as Promise<unknown>
-      watchSwitchOp('set', pendingSet)
-      // 超时放行：调用 hang 住不再卡死界面，与看门狗同超时；
-      // 无计时器时永不超时，原样等待（行为退化到修前）。
-      const myGen = (setLogSwitchGen.n += 1)
-      const timeoutAt = new Promise(function (resolve) {
-        const fire = function (): void {
-          resolve({ switchTimedOut: true })
-        }
-        try {
-          if (timer !== null && timer !== undefined && typeof timer.timeout === 'function') {
-            timer.timeout(fire, LOG_WATCHDOG_MS)
-            return
-          }
-        } catch (e) {
-          void e
-        }
-        try {
-          setTimeout(fire, LOG_WATCHDOG_MS)
-        } catch (e2) {
-          void e2
-        }
-      })
-      return Promise.race([pendingSet, timeoutAt]).then(function (res: unknown) {
-        const body = res && typeof res === 'object' ? (res as Record<string, unknown>) : null
-        if (body && body['switchTimedOut'] === true) {
-          logSwitchSetFail('timeout', 'timeout-' + LOG_WATCHDOG_MS)
-          return { ok: false, enabled: logSwitch.enabled, error: 'switch-timeout' }
-        }
-        if (myGen !== setLogSwitchGen.n) return { ok: false, enabled: logSwitch.enabled, error: 'stale' }
-        if (!body || body['ok'] !== true) {
-          logSwitchSetFail('host-rejected', 'host-rejected')
-          return { ok: false, enabled: logSwitch.enabled, error: 'host-rejected' }
-        }
-        logSwitch.enabled = body['enabled'] === true
-        logSwitch.sampleRate = next.sampleRate
-        persistLocalDebugSwitch(logSwitch)
-        try {
-          if (broadcast) broadcast()
-        } catch (e) {
-          void e
-        }
-        return { ok: true, enabled: logSwitch.enabled, sampleRate: logSwitch.sampleRate }
-      }).catch(function (e: unknown) {
-        if (myGen !== setLogSwitchGen.n) return { ok: false, enabled: logSwitch.enabled, error: 'stale' }
-        return { ok: false, enabled: logSwitch.enabled, error: failByThrow(e) }
-      })
-    } catch (e) {
-      return Promise.resolve({ ok: false, enabled: logSwitch.enabled, error: failByThrow(e) })
-    }
+  // 命名空间化挂 log 对象上（log.child / log.why 与顶层 child/why 同体）。
+  const logFn = log as ClientLogFn
+  try {
+    logFn.child = child
+    logFn.why = why
+  } catch (e) {
+    void e
   }
 
   return {
@@ -662,8 +369,12 @@ export function createClientLog(deps: ClientLogDeps, configInput?: ClientLogConf
     logDroppedState: logDroppedState,
     logForwardState: logForwardState,
     logFlushTimer: logFlushTimer,
+    traceState: traceState,
     isEnabled: isEnabled,
-    log: log,
+    log: logFn,
+    child: child,
+    why: why,
+    queryLogs: queryLogs,
     scheduleLogFlush: scheduleLogFlush,
     estimateBatchBytes: estimateBatchBytes,
     maybeForwardSummary: maybeForwardSummary,

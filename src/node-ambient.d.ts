@@ -7,10 +7,18 @@
  * 新增 Node 能力先补这里，再在实现里用；其余源文件不许引用本文件声明的模块。
  */
 
+declare module 'node:fs' {
+  // 只声明本包用到的那一个：realpathSync.native 把目录键归一到真实路径
+  // （同一目录的不同写法/符号链接必须撞同一个键，见 store.ts 的 normalizeLogDir）。
+  export const realpathSync: { (path: string): string; native(path: string): string }
+}
+
 declare module 'node:fs/promises' {
   export function mkdir(path: string, options?: { recursive?: boolean; mode?: number }): Promise<string | undefined>
   export function readFile(path: string, encoding: string): Promise<string>
   export function readdir(path: string): Promise<string[]>
+  // #21 封存用的原子改名（同目录内 from -> to）。
+  export function rename(from: string, to: string): Promise<void>
   export function rm(path: string, options?: { recursive?: boolean; force?: boolean }): Promise<void>
   export function unlink(path: string): Promise<void>
   export function writeFile(path: string, data: string, encoding: string): Promise<void>

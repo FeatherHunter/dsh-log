@@ -1,0 +1,25 @@
+import { type PhoneNameMap } from './config.js';
+export { buildPhoneName, buildPhoneNames, LOG_QUERY_ACTION_SUFFIX, buildLogQueryPhoneName } from './config.js';
+export type { PhoneAction, PhoneNameMap } from './config.js';
+export declare const CLIENT_BATCH: {
+    readonly maxPerBatch: 50;
+    readonly intervalMs: 1000;
+    readonly packetBytes: number;
+    readonly queueMax: 100;
+};
+export declare function buildClientPhoneNames(prefix: string): PhoneNameMap;
+import type { ClientLogDeps, ClientLogConfigInput, ResolvedClientLogConfig, ClientLog } from './client/types.js';
+export type { ClientHost, ClientTimer, ClientStorage, ClientBroadcast, ClientLogDeps, ClientLogConfigInput, ResolvedClientLogConfig, ClientDebugSwitch, ClientQueuedRow, ClientSendResult, ClientSwitchResult, ClientSetSwitchResult, TraceSource, TraceState, ChildCtx, TraceWhy, ClientLogFn, LogQueryClientArgs, ClientLog } from './client/types.js';
+export declare function resolveClientLogConfig(input?: Partial<ClientLogConfigInput>): ResolvedClientLogConfig;
+export declare const LOG_DEBUG_KEY = "dsws.debug";
+export declare function debugStorageKey(pluginId: string): string;
+export declare const LOG_BATCH_MAX = 50;
+export declare const LOG_FLUSH_MS = 1000;
+export declare const LOG_PACKET_BYTES: number;
+export declare const LOG_QUEUE_MAX = 100;
+export declare const LOG_WATCHDOG_MS = 5000;
+export declare const LOG_REV = 1;
+export declare const LOG_LEVELS: readonly ["error", "warn", "info", "debug"];
+export type ClientLogLevel = (typeof LOG_LEVELS)[number];
+export declare function createClientLog(deps: ClientLogDeps, configInput?: ClientLogConfigInput): ClientLog;
+export type ClientLogInstance = ReturnType<typeof createClientLog>;

@@ -1,0 +1,142 @@
+/**
+ * core/file-name.ts —— 日志文件名的唯一解析器（领域层，零 IO）
+ *
+ * 为什么单独成模块：写侧封存会把当日可写文件改名成 `<当日名>.<N>.log`，读侧（查询、导出、清空、
+ * 保留清理）曾经各自写一套正则，daily 下只认 `YYYY-MM-DD.log`。结果是文件一被封存，那些行对读侧
+ * 整体消失——磁盘上 14 行、查询只回 5 行，而且不报错（.local/probe-seam.mjs 实测）。
+ *
+ * 从此以后，凡是要「从文件名判断它是不是本桶的日志、属于哪天、是不是封存件」的地方都只走这一个解析器，
+ * 读侧与写侧的文件名形状不可能再分叉（tests/seam-invariant.test.mjs 钉住这条不变式）。
+ *
+ * 分层约束：本文件属于 core/，不许 import 上层模块（engine/host/client/entries）也不许碰 IO。
+ * 入参只取结构上需要的那一个字段（`fileNamePolicy`），所以任何带这个字段的配置对象都能直接传进来。
+ *
+ * 形状（与 config.ts 的 formatDailyFileName / formatFourSegmentFileName 一一对应）：
+ *   daily         可写 `YYYY-MM-DD.log`；封存 `YYYY-MM-DD.<N>.log`（N ≥ 1）
+ *   four-segment  可写 `YYYY-MM-DD.<标识>.<pid>.<启动时间>.log`
+ *                 封存 `YYYY-MM-DD.<标识>.<pid>.<启动时间>.<N>.log`
+ * 四段式的启动时间里允许出现点（ISO 毫秒），所以末尾的 `.N` 只在「去掉它之后仍解析得通」时才认。
+ * 已知边界：启动时间恰好以裸整数结尾（如 `...T00-00-00.5`）会被读成封存件；写侧启动时间来自 ISO 串，
+ * 末尾是 `Z` 或「数字+字母」，撞不上。
+ */
+
+export type FileNamePolicy = 'daily' | 'four-segment'
+
+/** 解析器只需要这一个字段：任何带 `fileNamePolicy` 的配置对象（含 ResolvedHostLogConfig）都满足。 */
+export interface FileNameConfig {
+  fileNamePolicy: FileNamePolicy
+}
+
+export interface LogFileInfo {
+  name: string
+  date: string
+  seq: number
+  sealed: boolean
+  policy: FileNamePolicy
+}
+
+const DAILY_FILE_RE = /^(\d{4}-\d{2}-\d{2})(?:\.(\d+))?\.log$/
+const FOUR_SEGMENT_BASE_RE = /^(\d{4}-\d{2}-\d{2})\.([a-z0-9-]{1,32})\.(\d+)\.(.+)\.log$/
+const FOUR_SEGMENT_SEALED_RE = /^(\d{4}-\d{2}-\d{2})\.([a-z0-9-]{1,32})\.(\d+)\.(.+)\.(\d+)\.log$/
+
+// 解析一个文件名；不是本桶的日志文件（开关文件、audit.json、别的形状）一律返回 null，调用方据此跳过。
+export function parseLogFileName(config: FileNameConfig, name: unknown): LogFileInfo | null {
+  const nm = typeof name === 'string' ? name : ''
+  if (!nm) return null
+  if (config.fileNamePolicy === 'four-segment') {
+    const sealed = FOUR_SEGMENT_SEALED_RE.exec(nm)
+    if (sealed) {
+      const seq = Number(sealed[5])
+      if (seq >= 1) return { name: nm, date: sealed[1], seq: seq, sealed: true, policy: 'four-segment' }
+    }
+    const base = FOUR_SEGMENT_BASE_RE.exec(nm)
+    if (base) return { name: nm, date: base[1], seq: 0, sealed: false, policy: 'four-segment' }
+    return null
+  }
+  const m = DAILY_FILE_RE.exec(nm)
+  if (!m) return null
+  if (!m[2]) return { name: nm, date: m[1], seq: 0, sealed: false, policy: 'daily' }
+  const seq = Number(m[2])
+  if (!(seq >= 1)) return null
+  return { name: nm, date: m[1], seq: seq, sealed: true, policy: 'daily' }
+}
+
+// 文件名里那一天的日期串（'YYYY-MM-DD'）；解析不通返空串。
+// 写侧按它决定「今天的文件叫什么」，保留清理按它决定「这份文件是哪天的」——同一处解析，不各写一套。
+export function logFileDate(config: FileNameConfig, name: unknown): string {
+  const info = parseLogFileName(config, name)
+  return info ? info.date : ''
+}
+
+// 写入先后＝行的时间先后。封存是「把当前可写文件改名成 .N，再开一个新的可写文件」，
+// 所以 .1 装的是当天最早的行、序号越大越新，而可写文件（seq 0）永远装最新的行 —— 它排在最后。
+// 注意不能按字典序排：`YYYY-MM-DD.10.log` 在字典序里排在 `YYYY-MM-DD.2.log` 前面。
+function writeOrderRank(info: LogFileInfo): number {
+  return info.seq === 0 ? Number.MAX_SAFE_INTEGER : info.seq
+}
+
+// 目录清单里属于本桶的日志文件，按**写入先后**排序。读侧拼接/导出用这个顺序就是行的时间顺序。
+export function logFilesOfDate(config: FileNameConfig, names: readonly unknown[], date: string): LogFileInfo[] {
+  const out: LogFileInfo[] = []
+  const list = Array.isArray(names) ? names : []
+  for (let i = 0; i < list.length; i += 1) {
+    const info = parseLogFileName(config, list[i])
+    if (info && info.date === date) out.push(info)
+  }
+  out.sort((a, b) => {
+    const ra = writeOrderRank(a)
+    const rb = writeOrderRank(b)
+    if (ra !== rb) return ra - rb
+    return a.name < b.name ? -1 : a.name > b.name ? 1 : 0
+  })
+  return out
+}
+
+// 目录清单里所有属于本桶的日志文件（不分日期），写入先后排序。清空/保留清理用它代替各处自写正则。
+export function listLogFiles(config: FileNameConfig, names: readonly unknown[]): LogFileInfo[] {
+  const out: LogFileInfo[] = []
+  const list = Array.isArray(names) ? names : []
+  for (let i = 0; i < list.length; i += 1) {
+    const info = parseLogFileName(config, list[i])
+    if (info) out.push(info)
+  }
+  out.sort((a, b) => {
+    if (a.date !== b.date) return a.date < b.date ? -1 : 1
+    const ra = writeOrderRank(a)
+    const rb = writeOrderRank(b)
+    if (ra !== rb) return ra - rb
+    return a.name < b.name ? -1 : a.name > b.name ? 1 : 0
+  })
+  return out
+}
+
+// 清空与导出里按文件名匹配的正则随策略分支（#558 Q2b）：
+// daily 走现有按天正则，四段式走对应的四段正则。
+//
+// **本函数是包内私有**（0.3.0 起不再导出）：它认不出封存件（daily 正则只匹配 `YYYY-MM-DD.log`），
+// 谁拿它当「这是不是本桶日志」的判据，谁就会重演「封存后历史行整体查不到」那个缺陷。
+// 对外一律走 parseLogFileName / listLogFiles / logFilesOfDate（单源解析器）。
+function logFileNamePattern(config: FileNameConfig): RegExp {
+  if (config.fileNamePolicy === 'four-segment') {
+    return /^\d{4}-\d{2}-\d{2}\.[a-z0-9-]{1,32}\.\d+\..+\.log$/
+  }
+  return /^\d{4}-\d{2}-\d{2}\.log$/
+}
+
+// 日期入参（YYYY-MM-DD）按策略选出要导出的文件名：daily 直接加 .log（沿现状）；
+// 四段式下指定日期匹配该日期开头的所有四段文件，取排序后第一个，找不到回退到当天文件名。
+export function matchExportFileName(
+  config: FileNameConfig,
+  candidates: string[],
+  wantDate: string,
+  fallbackFileName: string
+): string {
+  if (config.fileNamePolicy !== 'four-segment') {
+    return /^\d{4}-\d{2}-\d{2}$/.test(wantDate) ? wantDate + '.log' : fallbackFileName
+  }
+  const pattern = logFileNamePattern(config)
+  const hits = (Array.isArray(candidates) ? candidates : [])
+    .filter((name) => typeof name === 'string' && pattern.test(name) && name.indexOf(wantDate + '.') === 0)
+    .sort()
+  return hits.length > 0 ? hits[0] : fallbackFileName
+}

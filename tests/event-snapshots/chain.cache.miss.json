@@ -1,0 +1,13 @@
+{
+  "event": "chain.cache.miss",
+  "level": "debug",
+  "kind": "ondemand",
+  "fields": [
+    "keyHash",
+    "lang",
+    "reason"
+  ],
+  "guard": "按事件，有穿透才记",
+  "approvedAt": "2026-10-11",
+  "source": "tests/eventList.test.mjs makeSample (#18 Q6)"
+}
