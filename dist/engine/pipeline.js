@@ -7,7 +7,7 @@ import { hash8 } from '../core/ids.js';
 import { residentEventSet } from '../core/resident.js';
 import { logFileDate } from '../core/file-name.js';
 import { createLater } from '../platform/later.js';
-import { splitForAppend } from './io.js';
+import { sliceUtf8Tail, splitForAppend } from './io.js';
 export function createPipeline(input) {
     const config = input.config;
     const fs = input.fs;
@@ -18,6 +18,8 @@ export function createPipeline(input) {
     const writeTarget = input.io.writeTarget;
     const canAppend = input.io.canAppend;
     const appendTarget = input.io.appendTarget;
+    const canSize = input.io.canSize;
+    const sizeOfTarget = input.io.sizeOfTarget;
     const sealCurrentFile = input.rotation.sealCurrentFile;
     const appendAudit = input.rotation.appendAudit;
     const retainSweep = input.rotation.retainSweep;
@@ -36,6 +38,15 @@ export function createPipeline(input) {
     // 后续同形只更新该折叠行的 repeated 计数不再新增行；窗口过期或异形即开启新一轮计数。直通仍经防抖异步，未落盘前可在队内完成折叠。
     const FOLD_WINDOW_MS = 1000;
     const FOLD_THRESHOLD = 10;
+    // 追加路的核对与修补（2026-10-14 对抗审查后定）：
+    //   APPEND_ATTEMPTS —— 一次刷盘里最多「追加 → 核对 → 只补剩余」几轮。到顶就把没落地的剩余交给读改写兜底。
+    //   APPEND_VERIFY_EVERY —— 适配器没给 sizeOf（stat）时的核对频率：每 N 次追加回读一次。
+    //     给了 sizeOf 就每次追加都核对（O(1) 的 stat），不靠这个常量。
+    const APPEND_ATTEMPTS = 3;
+    const APPEND_VERIFY_EVERY = 8;
+    // 没有 stat 能力时「攒到多少字节就一定要回读核对一次」：把待核对的追加文本（内存）与「静默窗口」
+    // 都钉在有界值上——字节数到顶或次数到顶，先到者触发核对。
+    const APPEND_VERIFY_BYTES = 262144;
     function foldFieldsHash(fields) {
         try {
             return hash8(JSON.stringify(fields && typeof fields === 'object' ? fields : {}));
@@ -126,12 +137,24 @@ export function createPipeline(input) {
     // 它只是「事后发现」：挡不住读改写窗口内的并发覆写，也猜不出被吃了几行，所以只留诊断、不谎报 dropped。
     let expectedFileName = '';
     let expectedFileBytes = -1;
-    // 追加能力的「首次信任」记录（2026-10-14 对抗审查补）：
-    // 适配器可能**声明了 appendText 却什么都不做**——信任一个只会点头的适配器，就是当初假 rename
-    // 吞掉 12500 行的同一类错。所以每份文件第一次走追加路时，独立读回来确认「这次追加的字节真的在文件里」；
-    // 确认不了（长度没涨到期望）或追加直接抛错，就把这个实例的追加能力判死（appendUnusable），
-    // 退回读改写并把这一批补写一遍——宁可丢优化，不许自欺。
+    // 追加能力的独立核对（2026-10-14 对抗审查改写）：
+    // 适配器可能**声明了 appendText 却什么都不做**——信任一个只会点头的适配器，就是当初假 rename 吞掉
+    // 12500 行的同一类错。而且「只验第一次」不够：适配器「第一次写对、之后不写」照样会静默吃行，所以核对
+    // 要么走 sizeOf（stat，每次追加都核对，O(1)），要么每 APPEND_VERIFY_EVERY 次回读一次；核对不足时
+    // **只补没落地的后缀**，绝不整篇重写（重写会把已落地的字节再写一遍 → 重复行 + 粘连半行）。
     let appendVerifiedFileName = '';
+    // 「自上次核对以来、还没被独立确认过的追加文本」（2026-10-14 对抗审查 #1 的修法）：
+    // 没有 sizeOf 能力时核对只能隔几次做一次，这几批的字节就活在这里——一旦核对发现要少，
+    // 就能**从这段文本里**算出还差哪一截补回去，而不是只记一个记账数字、把窗口里消失的行永久丢掉。
+    let unverifiedAppends = '';
+    let unverifiedBytes = 0;
+    // 上次核对通过时的文件真实长度（-1 = 还不知道）：核对时拿它当基线，算出「基线之后落了多少字节」。
+    let verifiedFileBytes = -1;
+    // 上次核对之后又追加了几次（只在没有 sizeOf 能力时用得上）。
+    let appendsSinceVerify = 0;
+    // 「刚拿到一个新基线、还没做过信任检查」：新文件/封存之后、以及刚回读过文件的下一笔追加，
+    // 必须核对一次（确认适配器真的把字节写进去了），此后才转入按次数/按字节的周期核对。
+    let trustCheckPending = false;
     let appendUnusable = false;
     function notePersistFail(op, reason, dir) {
         if (!pendingPersistFail)
@@ -741,6 +764,12 @@ export function createPipeline(input) {
                         const sealedBytes = existingBytes;
                         existing = '';
                         existingBytes = 0;
+                        // 封存把当前文件改名走了：新文件的核对状态归零（基线回到 0），第一笔必须重新独立确认。
+                        unverifiedAppends = '';
+                        unverifiedBytes = 0;
+                        verifiedFileBytes = -1;
+                        appendsSinceVerify = 0;
+                        trustCheckPending = true;
                         await appendAudit(logDir, {
                             ts: Date.now(),
                             op: 'rotate.seal',
@@ -772,58 +801,199 @@ export function createPipeline(input) {
                         maxSize: config.maxSize
                     });
                 }
+                // 追加路的核对与修补都在这里；核对不足或追加抛错时**不抛出去**，而是在同一个 doOnce 里
+                // 走下面的读改写兜底——跨调用传「还剩多少没写」既难又容易写错（重试时会把落过的字节再写一遍）。
+                let needWriteFallback = false;
+                let fallbackCarry = '';
                 if (appendable) {
-                    // 追加路：不覆写旧文，只把新增行接到末尾；尺寸自己累加（封存过就从 0 起算）。
+                    // 追加路：不覆写旧文，只把新增行接到末尾。四件事一起做：
+                    //   ① 大块按行边界切块（O_APPEND 的大块写不保证原子，实测 64KB 行会落成半行）；
+                    //   ② 用**独立观察**（stat 优先，O(1)；没有就按需回读）确认「刚追加的字节真的在文件里」——
+                    //      追加动作的返回值不算证据；而且「只验第一次」也不够：适配器可以「第一次写对、之后不写」，
+                    //      只验首次的实现之后永久信任它，行就静默消失（2026-10-14 对抗审查 #1）；
+                    //   ③ 没核对过的批次文本攒在 unverifiedAppends 里，核对不足时**只补没落地的后缀**，
+                    //      绝不整篇重写（重写会把已落地的字节再写一遍 → 重复行，甚至「半行 + 下一行」粘连成
+                    //      一条永远解析不了的行，审查 #2）；
+                    //   ④ 换文件（封存/跨天）时核对状态归零：新文件的第一笔必须重新独立确认。
                     const appended = text + extra;
-                    const expectedAfter = Math.max(existingBytes, 0) + utf8Bytes(appended);
-                    // 按行边界切成 ≤ APPEND_ATOMIC_MAX 的块再逐块追加：大块 O_APPEND 写不保证原子，
-                    // 两个进程各写一大段时会互相插进去、落成半行（实测 64KB 行会有坏行，4KB 行不会）。
-                    const pieces = splitForAppend(appended);
-                    try {
-                        for (const piece of pieces)
-                            await appendTarget(target, piece);
+                    const appendedBytes = utf8Bytes(appended);
+                    const beforeBytes = Math.max(existingBytes, 0);
+                    if (fileName !== appendVerifiedFileName) {
+                        unverifiedAppends = '';
+                        unverifiedBytes = 0;
+                        verifiedFileBytes = -1;
+                        appendsSinceVerify = 0;
+                        trustCheckPending = true;
                     }
-                    catch (eAppend) {
-                        void eAppend;
-                        // 声明了追加却抛错：这条适配器这次不可信 → 判死追加能力，抛出去让 doOnce 的重试退回写路径。
-                        appendUnusable = true;
-                        notePersistFail('writeBatch', 'append-failed', logDir);
-                        throw eAppend;
+                    if (!sizeKnown && readOk) {
+                        // 刚读过文件：那次读就是可信基线（读的是文件真实内容），但**紧接着那一笔追加仍要核对一次**
+                        // ——「首触核验」正是抓「声明了追加却什么都不写」的那道网，不能因为有了基线就跳过它。
+                        unverifiedAppends = '';
+                        unverifiedBytes = 0;
+                        verifiedFileBytes = existingBytes;
+                        appendsSinceVerify = 0;
+                        trustCheckPending = true;
                     }
-                    if (appendVerifiedFileName === fileName) {
-                        expectedFileName = fileName;
-                        expectedFileBytes = expectedAfter;
-                    }
-                    else {
-                        // 每份文件的第一次追加：独立读回来确认这次追加真的进了文件。
-                        // 判据用「长度不小于期望」而不是「等于」——并发写者也追加时长度只会更大（O_APPEND 不覆写），
-                        // 用严格相等会把并发写者误判成「适配器撒谎」。
-                        let afterText = '';
-                        let afterBytes = -1;
+                    const baselineBytes = verifiedFileBytes >= 0 ? verifiedFileBytes : 0;
+                    const unverifiedText = unverifiedAppends + appended;
+                    const unverifiedTotalBytes = unverifiedBytes + appendedBytes;
+                    const expectedAfter = beforeBytes + appendedBytes;
+                    // 没有 stat 能力时：够次数、够字节数、或还没有基线，就回读核对一次；否则这一批先攒着。
+                    const dueForRead = trustCheckPending ||
+                        verifiedFileBytes < 0 ||
+                        appendsSinceVerify >= APPEND_VERIFY_EVERY ||
+                        unverifiedBytes + appendedBytes > APPEND_VERIFY_BYTES;
+                    // fresh=true：这次必须真观察（修补轮、以及「写了再抛」的故障轮都走它）。
+                    // fresh=false：没有 stat 能力且还没到该核对的时候 → 回 null（不知道怎么攒的账就不下结论）。
+                    const observeBytes = async (fresh) => {
+                        if (await canSize()) {
+                            const n = await sizeOfTarget(target);
+                            if (n !== null)
+                                return n;
+                        }
+                        if (!fresh && !dueForRead)
+                            return null;
                         try {
-                            afterText = await readTarget(target);
-                            afterBytes = utf8Bytes(afterText);
+                            return utf8Bytes(await readTarget(target));
                         }
-                        catch (eVerify) {
-                            void eVerify;
-                            // 读不回来就不下结论（验证不了 ≠ 失败）：继续按自己记的尺寸走，至少不丢行。
+                        catch (eObserve) {
+                            void eObserve;
+                            return null;
                         }
-                        if (afterBytes >= 0 && afterBytes < expectedAfter) {
-                            // 追加没生效（适配器什么都没写、写去了别处、或只写了一半）：这批行还在我们手里。
-                            // 判死追加能力并抛错 → doOnce 的重试退回读改写，把这批补写进去。绝不「自以为写了」。
-                            appendUnusable = true;
-                            appendVerifiedFileName = '';
-                            notePersistFail('writeBatch', 'append-not-effective', logDir);
-                            throw new Error('append-not-effective');
+                    };
+                    let pending = appended;
+                    let observedBytes = null;
+                    let satisfied = false;
+                    let landedAny = false;
+                    let threw = false;
+                    for (let attempt = 0; attempt < APPEND_ATTEMPTS; attempt += 1) {
+                        try {
+                            for (const piece of splitForAppend(pending))
+                                await appendTarget(target, piece);
                         }
+                        catch (eAppend) {
+                            void eAppend;
+                            threw = true;
+                            // 「写完再抛」也可能已经落了一部分：尽力观察一次，把没落地的留在 pending 里，
+                            // 免得兜底读改写时把落过的字节再写一遍。
+                            const seen = await observeBytes(true);
+                            if (seen !== null && seen >= baselineBytes + unverifiedTotalBytes) {
+                                // 观察显示攒下的这些其实全落地了（适配器写完才报错）：按成功记账，但这个适配器不再可信。
+                                satisfied = true;
+                                observedBytes = seen;
+                                appendUnusable = true;
+                                notePersistFail('writeBatch', 'append-failed', logDir);
+                                break;
+                            }
+                            if (seen !== null && seen > baselineBytes) {
+                                landedAny = true;
+                                pending = sliceUtf8Tail(unverifiedText, seen - baselineBytes);
+                            }
+                            else {
+                                pending = unverifiedText;
+                            }
+                            break;
+                        }
+                        observedBytes = await observeBytes(attempt > 0);
+                        if (observedBytes === null) {
+                            // 观察不到就不下结论（验证不了 ≠ 失败）：这一批攒进待核对缓冲，按记账继续，至少不丢行。
+                            satisfied = true;
+                            break;
+                        }
+                        if (observedBytes >= baselineBytes + unverifiedTotalBytes) {
+                            satisfied = true;
+                            break;
+                        }
+                        if (observedBytes > baselineBytes) {
+                            landedAny = true;
+                            // 只补「相对基线还差的那一段」：只写过前缀的适配器，差的就是它的剩余。
+                            pending = sliceUtf8Tail(unverifiedText, observedBytes - baselineBytes);
+                        }
+                        else {
+                            // 相对基线一个字节都没落（什么都没写、或写去了别处）：整段重来。
+                            pending = unverifiedText;
+                        }
+                    }
+                    if (satisfied) {
                         appendVerifiedFileName = fileName;
                         expectedFileName = fileName;
-                        // 用读回来的真实长度记账（可能含别人刚追加的字节），免得记账越漂越远。
-                        expectedFileBytes = afterBytes >= 0 ? afterBytes : expectedAfter;
+                        if (observedBytes !== null) {
+                            // 核对通过：基线推进到观察到的真实长度（可能含别人刚追加的字节），待核对缓冲清空。
+                            verifiedFileBytes = observedBytes;
+                            unverifiedAppends = '';
+                            unverifiedBytes = 0;
+                            appendsSinceVerify = 0;
+                            trustCheckPending = false;
+                            expectedFileBytes = Math.max(observedBytes, expectedAfter);
+                        }
+                        else {
+                            // 这次不该核对：把这一批攒进待核对缓冲，下次核对时一起验。
+                            unverifiedAppends = unverifiedText;
+                            unverifiedBytes = unverifiedTotalBytes;
+                            appendsSinceVerify += 1;
+                            expectedFileBytes = expectedAfter;
+                        }
+                    }
+                    else {
+                        // 到顶还没落齐：判死追加能力（本实例不再走追加路），把「还没落地的那一段」交给兜底。
+                        // reason 如实区分：一个字都没落 vs 落了一部分。
+                        appendUnusable = true;
+                        appendVerifiedFileName = '';
+                        unverifiedAppends = '';
+                        unverifiedBytes = 0;
+                        appendsSinceVerify = 0;
+                        notePersistFail('writeBatch', threw ? 'append-failed' : landedAny ? 'append-partial' : 'append-not-effective', logDir);
+                        needWriteFallback = true;
+                        // 交给兜底的**不是**「算出来的剩余字节」，而是这一整段没核对过的文本：
+                        // 批次被切成多块时，适配器可能把每块都截断（块与块之间出现空洞），落地的字节就不再是
+                        // 「整段的连续前缀」——按字节切剩余会切错，兜底改成按行对齐重算（见下方）。
+                        fallbackCarry = unverifiedText;
                     }
                 }
-                else {
-                    const payload = String(existing || '') + text + extra;
+                if (!appendable || needWriteFallback) {
+                    // 读改写兜底。分两种形态：
+                    //   · 本来就没有追加能力（!appendable）：读回旧文，拼上这一批，整篇写——老路径。
+                    //   · 追加路失败（needWriteFallback）：**不许**把「已落地的字节数」当成「整段连续前缀的长度」去截
+                    //     剩余——批次被切成多块时，适配器可能把每块都截断，块与块之间就出现空洞，落地的字节不再是
+                    //     连续前缀（按字节切会切出重复行和粘连半行）。所以改成**按行对齐**：文件里最后一条完整行
+                    //     之前的都算数，半行丢弃（整篇重写正好把它抹掉），只补「那之后还没出现过的行」。
+                    let payload = '';
+                    if (appendable && fallbackCarry !== '') {
+                        // 按行重建：保留文件里**能解析的、且不属于这批**的行，然后把这批整段按顺序补回去。
+                        // 为什么不能只补「剩下的字节」：批次被切成多块时，截断型适配器会在块与块之间留下空洞
+                        // （半行接下一块的开头 = 一条粘连行），此时「已落字节数」不等于「整段的连续前缀长度」，
+                        // 按字节切会切出重复行、并漏掉中间那几行。按行对齐不怕空洞：粘连行解析不了 → 丢掉；
+                        // 落过的行在本批集合里 → 也算已存在，最后统一由本批原文按序重写，既不重复也不缺行。
+                        const current = await readTarget(target);
+                        const wanted = fallbackCarry.split('\n').filter((line) => line !== '');
+                        const wantedSet = new Set(wanted);
+                        const kept = [];
+                        for (const line of current.split('\n')) {
+                            if (line === '' || wantedSet.has(line))
+                                continue;
+                            try {
+                                JSON.parse(line);
+                                kept.push(line);
+                            }
+                            catch (eParse) {
+                                void eParse;
+                            }
+                        }
+                        payload = (kept.length > 0 ? kept.join('\n') + '\n' : '') + wanted.join('\n') + '\n';
+                    }
+                    else {
+                        let current = existing;
+                        if (appendable) {
+                            try {
+                                current = await readTarget(target);
+                            }
+                            catch (eCurrent) {
+                                void eCurrent;
+                                current = existing;
+                            }
+                        }
+                        payload = String(current || '') + (fallbackCarry !== '' ? fallbackCarry : text + extra);
+                    }
                     await writeTarget(target, payload);
                     // 记下我们写完的长度：下一次读回来若对不上，就是有别的写者动过（见上方 foreign-write 判定）。
                     expectedFileName = fileName;

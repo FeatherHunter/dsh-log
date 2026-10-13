@@ -22,6 +22,9 @@ declare module 'node:fs/promises' {
   // #21 封存用的原子改名（同目录内 from -> to）。
   export function rename(from: string, to: string): Promise<void>
   export function rm(path: string, options?: { recursive?: boolean; force?: boolean }): Promise<void>
+  // 文件长度（2026-10-14 对抗审查补）：追加路用它独立核对「刚追加的字节真的在文件里」。
+  // 本包只用到 size，其余 stat 字段不声明——`types: []` 下声明越窄越不会与真 @types/node 冲突。
+  export function stat(path: string): Promise<{ size: number }>
   export function unlink(path: string): Promise<void>
   export function writeFile(path: string, data: string, encoding: string): Promise<void>
 }

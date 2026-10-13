@@ -3,7 +3,7 @@
 // 日志包按「目标对象」读写文件（resolve 出来的是个薄对象），Node 标准库按路径字符串读写，
 // 这一层就是那个转接点。全包只有这里 import node:fs。
 
-import { readFile, readdir, mkdir, unlink, writeFile, rename, appendFile } from 'node:fs/promises'
+import { readFile, readdir, mkdir, unlink, writeFile, rename, appendFile, stat } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import type { LogFileService } from './ports.js'
 
@@ -70,6 +70,18 @@ export function createNodeFileService(): LogFileService {
     // #21 封存：rename 是唯一原子动作（同目录内改名），失败就往上抛，由 store 决定降级。
     async rename(from: unknown, to: unknown): Promise<void> {
       await rename(targetPath(from), targetPath(to))
+    },
+    // 文件长度（2026-10-14 对抗审查补）：追加路用它**独立**核对「刚追加的字节真的在文件里」。
+    // 返回值不是追加动作的返回值——它问的是文件系统，适配器撒谎时这条会拆穿它。
+    // 文件不存在（第一次写之前）回 null，调用方按「观察不到」处理，不当成功。
+    async sizeOf(target: unknown): Promise<number | null> {
+      try {
+        const info = await stat(targetPath(target))
+        return info.size
+      } catch (e) {
+        if (e && (e as { code?: string }).code === 'ENOENT') return null
+        return null
+      }
     }
   }
 }

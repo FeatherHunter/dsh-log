@@ -50,6 +50,25 @@ export function splitForAppend(text) {
         pieces.push(buf);
     return pieces.length > 0 ? pieces : [text];
 }
+/**
+ * 按 UTF-8 字节偏移取后缀（`sliceUtf8Tail`）——修补「只写了一部分」时用它算出还没落地的剩余。
+ *
+ * 偏移落在多字节字符中间时，从该字符的开头返回（宁可多写一个字符，也不写出半个字符）。
+ */
+export function sliceUtf8Tail(text, byteOffset) {
+    if (byteOffset <= 0)
+        return text;
+    let bytes = 0;
+    for (let i = 0; i < text.length;) {
+        const cp = text.codePointAt(i);
+        const size = cp < 0x80 ? 1 : cp < 0x800 ? 2 : cp < 0x10000 ? 3 : 4;
+        if (bytes + size > byteOffset)
+            return text.slice(i);
+        bytes += size;
+        i += cp > 0xffff ? 2 : 1;
+    }
+    return '';
+}
 export function createEngineIo(input) {
     const fs = input.fs;
     const getPlatform = input.getPlatform;
@@ -125,5 +144,39 @@ export function createEngineIo(input) {
         }
         throw new Error('文件服务不支持追加');
     }
-    return { joinPath, joinLogPath, resolveTarget, readTarget, writeTarget, canAppend, appendTarget };
+    // 长度查询的选择顺序同上；查不到（没能力、文件还不存在、stat 抛错）一律回 null —— 意思是「观察不到」，
+    // 由调用方决定是回读补看还是沿用记账，绝不把「观察不到」当成「写成功了」。
+    async function canSize() {
+        if (fs !== undefined && fs !== null && typeof fs.sizeOf === 'function')
+            return true;
+        const platform = typeof getPlatform === 'function' ? await getPlatform() : null;
+        return Boolean(platform && platform.fs && typeof platform.fs.sizeOf === 'function');
+    }
+    async function sizeOfTarget(target) {
+        const pick = (n) => typeof n === 'number' && Number.isFinite(n) && n >= 0 ? n : null;
+        try {
+            if (fs !== undefined && fs !== null && typeof fs.sizeOf === 'function') {
+                return pick(await fs.sizeOf(target));
+            }
+            const platform = typeof getPlatform === 'function' ? await getPlatform() : null;
+            if (platform && platform.fs && typeof platform.fs.sizeOf === 'function') {
+                return pick(await platform.fs.sizeOf(target));
+            }
+        }
+        catch (e) {
+            void e;
+        }
+        return null;
+    }
+    return {
+        joinPath,
+        joinLogPath,
+        resolveTarget,
+        readTarget,
+        writeTarget,
+        canAppend,
+        appendTarget,
+        canSize,
+        sizeOfTarget,
+    };
 }

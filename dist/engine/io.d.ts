@@ -19,5 +19,13 @@ export interface EngineIo {
     writeTarget: (target: unknown, text: string) => Promise<unknown>;
     canAppend: () => Promise<boolean>;
     appendTarget: (target: unknown, text: string) => Promise<unknown>;
+    canSize: () => Promise<boolean>;
+    sizeOfTarget: (target: unknown) => Promise<number | null>;
 }
+/**
+ * 按 UTF-8 字节偏移取后缀（`sliceUtf8Tail`）——修补「只写了一部分」时用它算出还没落地的剩余。
+ *
+ * 偏移落在多字节字符中间时，从该字符的开头返回（宁可多写一个字符，也不写出半个字符）。
+ */
+export declare function sliceUtf8Tail(text: string, byteOffset: number): string;
 export declare function createEngineIo(input: EngineIoInput): EngineIo;

@@ -71,6 +71,29 @@ export interface EngineIo {
   // 用能力查询而不是「抛错再兜底」，因为「没有追加原语」是正常形态（宿主只给读写时就走读改写）。
   canAppend: () => Promise<boolean>
   appendTarget: (target: unknown, text: string) => Promise<unknown>
+  // 文件长度查询（可选能力，2026-10-14 对抗审查补）：追加路要能**独立**确认「我写进去的字节真的在文件里」。
+  // `appendText` 的返回值不算独立证据（适配器可以撒谎），`stat` 是。没有它就退回「按需回读」，
+  // 见 pipeline 里的 APPEND_VERIFY_EVERY：有 stat 每次追加都核对，没有就每 N 次回读一次。
+  canSize: () => Promise<boolean>
+  sizeOfTarget: (target: unknown) => Promise<number | null>
+}
+
+/**
+ * 按 UTF-8 字节偏移取后缀（`sliceUtf8Tail`）——修补「只写了一部分」时用它算出还没落地的剩余。
+ *
+ * 偏移落在多字节字符中间时，从该字符的开头返回（宁可多写一个字符，也不写出半个字符）。
+ */
+export function sliceUtf8Tail(text: string, byteOffset: number): string {
+  if (byteOffset <= 0) return text
+  let bytes = 0
+  for (let i = 0; i < text.length; ) {
+    const cp = text.codePointAt(i) as number
+    const size = cp < 0x80 ? 1 : cp < 0x800 ? 2 : cp < 0x10000 ? 3 : 4
+    if (bytes + size > byteOffset) return text.slice(i)
+    bytes += size
+    i += cp > 0xffff ? 2 : 1
+  }
+  return ''
 }
 
 export function createEngineIo(input: EngineIoInput): EngineIo {
@@ -147,5 +170,39 @@ export function createEngineIo(input: EngineIoInput): EngineIo {
     throw new Error('文件服务不支持追加')
   }
 
-  return { joinPath, joinLogPath, resolveTarget, readTarget, writeTarget, canAppend, appendTarget }
+  // 长度查询的选择顺序同上；查不到（没能力、文件还不存在、stat 抛错）一律回 null —— 意思是「观察不到」，
+  // 由调用方决定是回读补看还是沿用记账，绝不把「观察不到」当成「写成功了」。
+  async function canSize(): Promise<boolean> {
+    if (fs !== undefined && fs !== null && typeof fs.sizeOf === 'function') return true
+    const platform = typeof getPlatform === 'function' ? await getPlatform() : null
+    return Boolean(platform && platform.fs && typeof platform.fs.sizeOf === 'function')
+  }
+  async function sizeOfTarget(target: unknown): Promise<number | null> {
+    const pick = (n: unknown): number | null =>
+      typeof n === 'number' && Number.isFinite(n) && n >= 0 ? n : null
+    try {
+      if (fs !== undefined && fs !== null && typeof fs.sizeOf === 'function') {
+        return pick(await fs.sizeOf(target))
+      }
+      const platform = typeof getPlatform === 'function' ? await getPlatform() : null
+      if (platform && platform.fs && typeof platform.fs.sizeOf === 'function') {
+        return pick(await platform.fs.sizeOf(target))
+      }
+    } catch (e) {
+      void e
+    }
+    return null
+  }
+
+  return {
+    joinPath,
+    joinLogPath,
+    resolveTarget,
+    readTarget,
+    writeTarget,
+    canAppend,
+    appendTarget,
+    canSize,
+    sizeOfTarget,
+  }
 }

@@ -27,7 +27,7 @@ await log.ready   // 读一次刷一次：把此刻为止的行刷到底，再�
 >   - **有追加能力**（`dsh-log/node` 的入口自带；宿主自己实现文件服务时包一层 `fs.appendFile` 即可）：两个进程**只会交错、不会互相覆写**。实测两进程同目录各写 8 行、每行都刷到底，16 行一行不少、无撕裂行；**大行也验过**：两进程各写 20 行、每行 64 KB，40 行一行不少、0 条半行——因为引擎会把批次按**行边界**切成不超过 4 KB 的块再逐块追加（一次大块 `O_APPEND` 写不保证原子，实测不切块时会出现 2 条读不出来的半行）。边界：单行自己超过 4 KB 时它整行写、不再切（切开必然半行），所以「一行几十 KB × 多进程同写」仍有理论风险，别这么用。
 >   - **没有追加能力**（只有读改写的宿主）：后写者按自己读到的旧内容整份覆写，会吃掉对方刚写的行（实测两进程各写 5 行、间隔 30 毫秒，10 行只剩 9 行；双方 `exit 0`、不增 `dropped`）。
 >   - 两种形态都补了**事后可观测**：我们记得自己上次写完这份文件的字节数，下次读回来对不上就落一条 `log.persist.fail(reason: 'foreign-write')` 诊断行（追加模式下在首触与「封存之前」各读一次，零额外 IO）。它只报告「有人动过」，不猜被吃了几行，所以 `dropped` 不会跟着涨。
->   - 自己实现文件服务时注意：声明了 `appendText` 就得**真写**——引擎在每份文件的第一次追加后会独立读回来核对，发现没写进去就判死这条能力、退回读改写，并落一条 `log.persist.fail(reason: 'append-not-effective')`；`appendText` 直接抛错则记 `append-failed`。两种降级都不丢行。
+>   - 自己实现文件服务时注意：声明了 `appendText` 就得**真写**。引擎不把「追加动作正常返回」当证据，而是**独立核对**：适配器给了 `sizeOf`（`dsh-log/node` 的入口给了）就每笔追加后用 stat 对一次长度；没给就每 8 笔追加或累计 256 KB 回读一次。核对发现少写了就**只补没落地的那一段**（退回读改写时会按行重建，绝不把已落地的字节再写一遍），并落一条 `log.persist.fail`：`append-not-effective`（一个字节都没落）、`append-partial`（落了一部分）、`append-failed`（`appendText` 自己抛错）。三种降级都不丢行、不重复、不留粘连半行。
 >   - 正确做法仍然是一个日志目录只给一个写者：并发追加虽然不丢行，但行与行之间会交错，同一条链路的时间先后不再可信。
 
 DSH 插件宿主侧（接线 3 步，运行依赖由宿主提供）：
@@ -233,7 +233,7 @@ clientLog.log('info', 'my.event', { step: 'started' })   // info 需开关打开
 
 开关读写失败保持旧值，不回退为开启。客户端写开关失败原因只给机器码（`host-unavailable`、`host-rejected`、`switch-timeout`、`stale` 等），面向用户的文案由界面经多语言系统转换。
 
-`log.persist.fail` 的 `reason` 取值（都是内部自监控行，`level` 为 `warn`，不计入 `dropped`）：`write-fail`（写盘重试后仍失败，行在重试位）、`dir-conflict`（目录或开关文件被别的活跃写者占着）、`no-dir`（取不到日志目录）、`foreign-write`（**跨进程可观测**：下次读回来发现这份文件的长度与我们自己上次写完的对不上——说明有别的写者动过它，见第 1 节末条）、`append-not-effective`（自己实现的 `fs` 声明了 `appendText` 却什么都没写：读回来长度没涨，那批行改用读改写补上）、`append-failed`（`appendText` 直接抛错，同样退回读改写）。后两个都在把追加能力判死之后才记，一个实例只可能各记一次。`foreign-write` 只报告「有人动过」，不猜被吃了几行，所以丢弃数不会跟着涨。
+`log.persist.fail` 的 `reason` 取值（都是内部自监控行，`level` 为 `warn`，不计入 `dropped`）：`write-fail`（写盘重试后仍失败，行在重试位）、`dir-conflict`（目录或开关文件被别的活跃写者占着）、`no-dir`（取不到日志目录）、`foreign-write`（**跨进程可观测**：下次读回来发现这份文件的长度与我们自己上次写完的对不上——说明有别的写者动过它，见第 1 节末条）、`append-not-effective`（自己实现的 `fs` 声明了 `appendText` 却一个字节都没写：独立核对发现长度没涨，那批行改用读改写补上）、`append-partial`（`appendText` 只写了一部分——含「写完才抛错」的情况：核对发现少了多少就只补那一段，绝不整篇重写）、`append-failed`（`appendText` 直接抛错，同样退回读改写）。这三个都在把追加能力判死之后才记，一个实例最多各记一次；`foreign-write` 只报告「有人动过」，不猜被吃了几行，所以丢弃数不会跟着涨。
 
 ## 6.1 轮转与保留（#21）
 
@@ -316,7 +316,7 @@ CI 已把上面这些固化成三条作业（`.github/workflows/ci.yml`）：测
 
 快照门禁只有黄/红两档（#18 Q6）：黄 warn——清单新增字段但快照未更新（`tests/snapshot.test.mjs` 只警告不判红，跑 `node tests/update-snapshots.mjs` 一键更新即转绿，不阻排障）；红 error——未知事件名、envelope 非法（落盘行五键 `{v,ts,level,event,fields}` 中 `v` 不为 3 或形状不对）、事件总数突变（与 `tests/event-snapshots/_baseline.json` 比 ±超 5 且 `tests/event-snapshots/CHANGELOG.md` 无说明；红的是“无 changelog”不是字段本身，补说明后跑更新命令即转绿）。事件条数就记在 `tests/event-snapshots/` 这套快照里，别在文档里抄数字。
 
-`npm test` 的用例清单来自 `package.json` 的 `test` 脚本（上面那十九个文件、共 **173 例**；`pretest` 会先跑 `node build.mjs`，所以测试一定在最新产物上跑）。类型检查：`npm run typecheck`（脚本内已直调 `node node_modules/typescript/bin/tsc`，绕开仓库里那个指向失效路径的 `.bin/tsc` 垫片）。发行面那两套（`release-surface`、`consumer-types`）会把包按 junction 装进临时工程、用真 tsc 编译一次，所以「类型能不能被消费者用上」是门禁里跑出来的结论，不是文档里的承诺。
+`npm test` 的用例清单来自 `package.json` 的 `test` 脚本（上面那十九个文件、共 **180 例**；`pretest` 会先跑 `node build.mjs`，所以测试一定在最新产物上跑）。类型检查：`npm run typecheck`（脚本内已直调 `node node_modules/typescript/bin/tsc`，绕开仓库里那个指向失效路径的 `.bin/tsc` 垫片）。发行面那两套（`release-surface`、`consumer-types`）会把包按 junction 装进临时工程、用真 tsc 编译一次，所以「类型能不能被消费者用上」是门禁里跑出来的结论，不是文档里的承诺。
 
 ### 9.1 源码分层（贡献者视角）
 

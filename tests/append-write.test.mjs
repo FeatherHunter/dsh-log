@@ -9,7 +9,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import path from 'node:path'
-import { mkdir, mkdtemp, readFile, readdir, rename, rm, unlink, appendFile, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, unlink, appendFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
@@ -86,6 +86,64 @@ function makeLyingFs(mode) {
     fs.state.appendCalls += 1
     if (mode === 'throw') throw new Error('这台适配器的 appendText 是坏的')
     return undefined
+  }
+  return fs
+}
+
+const pathOf = (t) => (t && typeof t === 'object' && typeof t.path === 'string' ? t.path : String(t))
+
+// 给文件服务加 stat 能力（sizeOf）——node 适配器就有它。有它时每次追加都会独立核对（O(1) 的 stat），
+// 所以「第一次写对、之后不写」这类适配器能当场抓出来，而不是等到下一次回读。
+function withSize(fs) {
+  fs.state.sizeCalls = 0
+  fs.sizeOf = async (t) => {
+    fs.state.sizeCalls += 1
+    try {
+      return (await stat(pathOf(t))).size
+    } catch (e) {
+      if (e && e.code === 'ENOENT') return null
+      return null
+    }
+  }
+  return fs
+}
+
+// 「第一次写对、之后不写」（对抗审查 #1 的最小复现）：最阴的一种——只验首次的实现能过第一关，
+// 之后永久信任它，行就静默消失（60 行只落 5 行、dropped 还是 0）。
+function makeNoopAfterFs(okCalls) {
+  const fs = makeCountingFs()
+  const real = fs.appendText
+  let calls = 0
+  fs.appendText = async (t, text) => {
+    calls += 1
+    if (calls > okCalls) {
+      fs.state.appendCalls += 1
+      return undefined
+    }
+    return real(t, text)
+  }
+  return fs
+}
+
+// 只写一半（对抗审查 #2）：验证必然失败，修补必须**只补没落地的剩余**——
+// 整篇重写会把已落地的字节再写一遍，落成重复行，甚至「半行 + 下一行」粘连成解析不了的行。
+function makeHalfFs() {
+  const fs = makeCountingFs()
+  const real = fs.appendText
+  fs.appendText = async (t, text) => {
+    const half = text.slice(0, Math.max(1, Math.floor(text.length / 2)))
+    return real(t, half)
+  }
+  return fs
+}
+
+// 写完再抛（对抗审查 #2 的兄弟场景）：字节已经落了，抛错不能让兜底把整批再写一遍。
+function makeWroteThenThrowFs() {
+  const fs = makeCountingFs()
+  const real = fs.appendText
+  fs.appendText = async (t, text) => {
+    await real(t, text)
+    throw new Error('写完才报错')
   }
   return fs
 }
@@ -310,6 +368,100 @@ describe('追加写（appendText 能力）', () => {
       const bigPieces = t.fs.state.appendedTexts.slice(before)
       assert.equal(bigPieces.length, 1, '单行超上限时它自成一个块（不许从行中间断开）')
       assert.ok(bigPieces[0].endsWith('\n'), '整行写完，只在行尾收尾')
+    } finally {
+      await t.cleanup()
+    }
+  })
+
+  it('⑨ 适配器「第一次写对、之后不写」：每次追加都独立核对，行不许静默消失（对抗审查 #1）', async () => {
+    // 依据：对抗审查探针 probe-a3.mjs（noop-after-first）——只验首次的实现里，60 行只落 5 行、
+    // 55 行静默消失，dropped/pending/lastPersistFail 全是「一切正常」。有 stat 能力时核对是每批都做的，
+    // 所以第二笔追加当场就能发现，随后判死追加路、退回读改写补齐。
+    const fs = withSize(makeNoopAfterFs(1))
+    const t = await makeStore({ fs })
+    try {
+      for (let i = 0; i < 12; i += 1) {
+        t.store.log('warn', 'noop.row', { i })
+        await t.store.synced()
+      }
+      const rows = await t.allRows()
+      assert.equal(rows.filter((r) => r.event === 'noop.row').length, 12, '十二行一行不许少')
+      assert.equal(new Set(rows.filter((r) => r.event === 'noop.row').map((r) => r.fields.i)).size, 12, '不许有重复行')
+      assert.equal(t.store.getDroppedCount(), 0)
+      assert.ok(fs.state.sizeCalls >= 3, '有 stat 能力时每笔追加都要核对，实际 ' + fs.state.sizeCalls + ' 次')
+      assert.ok(
+        rows.some((r) => r.event === 'log.persist.fail' && String(r.fields.reason).startsWith('append-')),
+        '降级必须留诊断，不许静默'
+      )
+    } finally {
+      await t.cleanup()
+    }
+  })
+
+  it('⑩ 只写一半：只补没落地的剩余，不许重复行、不许粘连半行（对抗审查 #2）', async () => {
+    // 依据：对抗审查探针 probe-a3/a4（half）——旧补救是「读回来 + 整批重写」，20 行落成 31 行（10 行重复），
+    // 还留下一条永远 JSON.parse 不了的粘连行。这里刻意复刻它的形态：**一批**里塞 20 行、每行 300 字节
+    // （批次会被切成多块，截断型适配器于是会在块与块之间留下空洞——这正是「按字节算剩余」会切错的地方）。
+    const fs = withSize(makeHalfFs())
+    const t = await makeStore({ fs })
+    try {
+      for (let i = 0; i < 20; i += 1) t.store.log('warn', 'half.row', { i, pad: 'h'.repeat(300) })
+      await t.store.synced()
+      const lines = (await readFile(t.dayFile(), 'utf8')).split('\n').filter(Boolean)
+      for (const line of lines) {
+        assert.doesNotThrow(() => JSON.parse(line), '落盘行都必须能解析（不许有粘连半行）：' + line.slice(0, 40))
+      }
+      const rows = lines.map((l) => JSON.parse(l))
+      assert.equal(rows.filter((r) => r.event === 'half.row').length, 20, '二十行各恰一次，重复行也是缺陷')
+      assert.equal(new Set(rows.filter((r) => r.event === 'half.row').map((r) => r.fields.i)).size, 20, '二十行一行不少')
+      assert.equal(t.store.getDroppedCount(), 0)
+      assert.ok(
+        rows.some((r) => r.event === 'log.persist.fail' && String(r.fields.reason).startsWith('append-')),
+        '部分落盘要留诊断'
+      )
+    } finally {
+      await t.cleanup()
+    }
+  })
+
+  it('⑪ 写完再抛：字节已落地就不许再写一遍（对抗审查 #2 的兄弟场景）', async () => {
+    const fs = withSize(makeWroteThenThrowFs())
+    const t = await makeStore({ fs })
+    try {
+      for (let i = 0; i < 4; i += 1) {
+        t.store.log('warn', 'wtt.row', { i })
+        await t.store.synced()
+      }
+      const rows = await t.allRows()
+      assert.equal(rows.filter((r) => r.event === 'wtt.row').length, 4, '四行各恰一次（写过了再写一遍就是重复行）')
+      assert.equal(t.store.getDroppedCount(), 0)
+      assert.ok(
+        rows.some((r) => r.event === 'log.persist.fail' && r.fields.reason === 'append-failed'),
+        '写完才报错也要留 append-failed 诊断'
+      )
+    } finally {
+      await t.cleanup()
+    }
+  })
+
+  it('⑫ 没有 stat 能力 + 后程撒谎：核对窗口内攒的文本要能补回来，一行不丢（对抗审查 #1 的无 stat 分支）', async () => {
+    // 没有 sizeOf 时只能「每 N 次追加回读一次」核对。关键不是「核对得多勤」，而是核对发现缺口时
+    // 还**找得回**那几批的文本（unverifiedAppends）：只记一个记账数字的话，窗口里消失的行就永久丢了。
+    const fs = makeNoopAfterFs(1)
+    const t = await makeStore({ fs })
+    try {
+      for (let i = 0; i < 14; i += 1) {
+        t.store.log('warn', 'late.row', { i })
+        await t.store.synced()
+      }
+      const rows = await t.allRows()
+      assert.equal(rows.filter((r) => r.event === 'late.row').length, 14, '十四行一行不丢（含核对窗口内的那几批）')
+      assert.equal(new Set(rows.filter((r) => r.event === 'late.row').map((r) => r.fields.i)).size, 14, '不许重复')
+      assert.equal(t.store.getDroppedCount(), 0)
+      assert.ok(
+        rows.some((r) => r.event === 'log.persist.fail' && String(r.fields.reason).startsWith('append-')),
+        '要留诊断'
+      )
     } finally {
       await t.cleanup()
     }

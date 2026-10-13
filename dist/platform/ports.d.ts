@@ -7,6 +7,7 @@ export interface LogFileService {
     listDir?: (dirTarget: unknown) => Promise<unknown>;
     rename?: (from: unknown, to: unknown) => Promise<unknown>;
     appendText?: (target: unknown, text: string) => Promise<unknown>;
+    sizeOf?: (target: unknown) => Promise<number | null>;
 }
 export interface LogTimer {
     timeout: (fn: (...args: unknown[]) => void, ms: number) => unknown;
@@ -23,6 +24,7 @@ export interface LogPlatformFs {
     listDir?: (dirTarget: unknown) => Promise<unknown>;
     rename?: (from: unknown, to: unknown) => Promise<unknown>;
     appendText?: (target: unknown, text: string) => Promise<unknown>;
+    sizeOf?: (target: unknown) => Promise<number | null>;
 }
 export interface LogPlatform {
     os?: string;

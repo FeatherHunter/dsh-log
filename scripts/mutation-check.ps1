@@ -39,10 +39,20 @@ Write-Host "dist 快照指纹: $fingerHash（本次结论只对应这个构建�
 
 # 基线：未变异的副本必须先全绿，否则后面每一条 RED 都可能是「本来就在红」，整张表没有意义。
 Copy-Item (Join-Path $snap 'dist') (Join-Path $work 'dist') -Recurse
-$base = & node --test (Join-Path $work 'tests/*.test.mjs') 2>&1
+# 显式列举测试文件，**不用 glob 参数**：Node 22 在 Windows 上对「带反斜杠的 glob 实参」处理
+# 与 Node 24 不同（CI 的 windows+node22 作业里基线就栽在这儿，本地 node24 却过）。
+$testFiles = @(Get-ChildItem (Join-Path $work 'tests') -Filter '*.test.mjs' -File | Sort-Object Name | ForEach-Object { $_.FullName })
+$base = & node --test @testFiles 2>&1
 if ($LASTEXITCODE -ne 0) {
   Write-Host '基线不绿，变异表无意义 —— 先修测试：'
-  $base | Select-Object -Last 20
+  $tail = $base | Select-Object -Last 20
+  $tail | ForEach-Object { $_ }
+  # CI 里把这段塞进 job summary：GitHub 的作业日志要鉴权才下得下来，summary 不用。
+  if ($env:GITHUB_STEP_SUMMARY) {
+    $lines = @('## 变异表基线不绿（' + $testFiles.Count + ' 个测试文件）', '')
+    $lines += ($tail | ForEach-Object { [string]$_ })
+    Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value ($lines -join "`n")
+  }
   Remove-Item $work -Recurse -Force
   exit 1
 }
@@ -334,8 +344,8 @@ export interface LogTimer {" }
   # 指向 ③，表里报 GREEN，靠 `-Only M63` 打印原始输出才看清是「指错了用例」而不是「断言没咬住」）。
   @{ name = 'M63 追加后不累加已有尺寸（追加路下永不封存）'; file = 'engine/pipeline.js'
      tests = 'append-write'; pattern = '尺寸是累加的'
-     from = "const expectedAfter = Math.max(existingBytes, 0) + utf8Bytes(appended);"
-     to   = "const expectedAfter = utf8Bytes(appended);" }
+     from = "const expectedAfter = beforeBytes + appendedBytes;"
+     to   = "const expectedAfter = appendedBytes;" }
   # M64 封存前不确认真实长度：外来写者动过文件也不再留 foreign-write（追加路绕掉跨进程判定）。
   @{ name = 'M64 封存前不确认长度（追加路绕掉跨进程判定）'; file = 'engine/pipeline.js'
      tests = 'append-write'; pattern = '封存之前会读一次确认'
@@ -343,27 +353,51 @@ export interface LogTimer {" }
      to   = "if (false) {" }
   # M65-M67 追加能力的「首次信任」检查（2026-10-14 对抗审查补：适配器可能声明了 appendText 却什么都不做，
   # 历史上假 rename 就这样吞掉过 12500 行）。
-  # M65 不验证「追加是否真落地」→ 撒谎适配器的那批行静默消失。
+  # M65 不比对「观察到的长度」与「应有长度」→ 撒谎适配器的那批行静默消失。
   @{ name = 'M65 不验证追加是否落地（撒谎的 appendText 静默吃行）'; file = 'engine/pipeline.js'
      tests = 'append-write'; pattern = '撒谎的 appendText'
-     from = "if (afterBytes >= 0 && afterBytes < expectedAfter) {"
-     to   = "if (false) {" }
-  # M66 判定无效后不抛错 → 不退回读改写，那批行就此不见。
+     from = "if (observedBytes >= baselineBytes + unverifiedTotalBytes) {"
+     to   = "if (observedBytes !== null) {" }
+  # M66 判定无效却不退回读改写 → 那批行就此不见（兜底标志置假）。
   @{ name = 'M66 判定追加无效却不退回读改写（那批行不见）'; file = 'engine/pipeline.js'
      tests = 'append-write'; pattern = '撒谎的 appendText'
-     from = "throw new Error('append-not-effective');"
-     to   = "void 0;" }
-  # M67 判死之后仍继续用追加 → 坏适配器把行永远卡在重试位。
-  @{ name = 'M67 判死追加能力后仍继续追加（行永远落不了盘）'; file = 'engine/pipeline.js'
-     tests = 'append-write'; pattern = '抛错的 appendText'
-     from = "const appendable = !appendUnusable && (await canAppend());"
-     to   = "const appendable = await canAppend();" }
+     from = "needWriteFallback = true;"
+     to   = "needWriteFallback = false;" }
+  # M67 判死之后仍继续用追加（坏适配器每批都白试一遍）→ ⑥ 的「此后不再依赖追加」断言必须咬住。
+  # 历史：这条原先是「算 appendable 时无视 appendUnusable」，实测在该用例下会让用例挂死（180 秒超时），
+  # 换成「永远不把能力判死」等价且能快速失败。
+  @{ name = 'M67 判死追加能力后仍继续追加（白试一遍）'; file = 'engine/pipeline.js'
+     tests = 'append-write'; pattern = '撒谎的 appendText'
+     from = "appendUnusable = true;"
+     to   = "appendUnusable = false;" }
   # M68 大块一次性追加（不按行边界切块）→ 两个进程各写大行时会互相插进去，落成半行 JSON
   # （实测 20×64KB 两进程 → 2 条坏行）。
   @{ name = 'M68 大块一次性追加（不切块，半行风险回来）'; file = 'engine/pipeline.js'
      tests = 'append-write'; pattern = '按行边界切块追加'
-     from = "const pieces = splitForAppend(appended);"
-     to   = "const pieces = [appended];" }
+     from = "for (const piece of splitForAppend(pending))"
+     to   = "for (const piece of [pending])" }
+  # M72 追加路只在首触核对一次（不再按次数/字节周期性核对）→ 适配器「第一次写对、之后不写」时行静默消失
+  # （对抗审查 #1：noop-after-first 实测 60 行只落 5 行、dropped=0、lastPersistFail=null）。
+  @{ name = 'M72 追加核对只在首触做一次（后程撒谎静默吃行）'; file = 'engine/pipeline.js'
+     tests = 'append-write'; pattern = '第一次写对、之后不写'
+     from = "if (await canSize()) {"
+     to   = "if (await canSize() && appendVerifiedFileName !== fileName) {" }
+  # M73 追加失败后的兜底不再按行重建（退回 current + 整批）→ 截断型适配器留下的空洞变成重复行 + 粘连半行
+  # （对抗审查 #2：half 实测 20 行落成 31 行、其中 1 条永远解析不了的粘连行）。
+  @{ name = 'M73 兜底不按行重建（重复行 + 粘连半行回来）'; file = 'engine/pipeline.js'
+     tests = 'append-write'; pattern = '只写一半'
+     from = "if (appendable && fallbackCarry !== '') {"
+     to   = "if (false) {" }
+  # M74 没有 stat 能力时不攒「待核对文本」（只记一个记账数字）→ 核对窗口内那几批的行找不回来，永久丢失。
+  @{ name = 'M74 待核对文本不攒（核对窗口内的行丢了找不回）'; file = 'engine/pipeline.js'
+     tests = 'append-write'; pattern = '没有 stat 能力'
+     from = "unverifiedAppends = unverifiedText;"
+     to   = "unverifiedAppends = '';" }
+  # M75 按行重建时不剔掉「已经落过的本批行」→ 同一批行会被写两遍（重复行）。
+  @{ name = 'M75 按行重建不剔已落行（重复行）'; file = 'engine/pipeline.js'
+     tests = 'append-write'; pattern = '只写一半'
+     from = "if (line === '' || wantedSet.has(line))"
+     to   = "if (line === '')" }
 )
 
 $rows = @()
@@ -387,8 +421,27 @@ foreach ($m in $mutations) {
   # 于是「synced() 等待在途写盘（N3）」这类名字永远匹配不上 —— 而 node 匹配不到时仍退 0，
   # 会把「根本没跑」误报成 GREEN（这张表踩过一次）。
   $pat = [regex]::Escape($m.pattern)
-  $out = & node --test --test-reporter=spec "--test-name-pattern=$pat" (Join-Path $work ('tests\' + $(if ($m.tests) { $m.tests } else { 'isolation' }) + '.test.mjs')) 2>&1
-  $code = $LASTEXITCODE
+  $testPath = Join-Path $work ('tests\' + $(if ($m.tests) { $m.tests } else { 'isolation' }) + '.test.mjs')
+  # 用 .NET 的 Process + ArgumentList 直接起进程：一是避免 shell 再解释一遍正则模式，
+  # 二是**必须能超时**——变异可能让被测代码死循环（2026-10-14 实测：某条变异把用例挂死，
+  # 整张表 13 分钟没动静，CI 上就会一直挂到作业上限）。超时时长 180 秒，按「不可信」处理。
+  $psi = [System.Diagnostics.ProcessStartInfo]::new()
+  $psi.FileName = (Get-Command node).Source
+  $psi.UseShellExecute = $false
+  $psi.RedirectStandardOutput = $true
+  $psi.RedirectStandardError = $true
+  foreach ($argItem in @('--test', '--test-reporter=spec', ("--test-name-pattern=" + $pat), $testPath)) { $psi.ArgumentList.Add($argItem) }
+  $proc = [System.Diagnostics.Process]::Start($psi)
+  $outTask = $proc.StandardOutput.ReadToEndAsync()
+  $errTask = $proc.StandardError.ReadToEndAsync()
+  $exited = $proc.WaitForExit(180000)
+  if (-not $exited) {
+    try { $proc.Kill($true) } catch { }
+    $rows += [pscustomobject]@{ 变异 = $m.name; 结果 = 'TIMEOUT（用例挂死，不可信）' }
+    continue
+  }
+  $out = @($outTask.Result -split "`r?`n") + @($errTask.Result -split "`r?`n")
+  $code = $proc.ExitCode
   # 真跑过用例才会有缩进的结果行（  ✔ /  ✖）；一条都没有就是没匹配到，不能算「咬住」。
   $ranAny = ($out | Select-String -Pattern '^\s+[✔✖]' ) -ne $null
   $verdict = $(if (-not $ranAny) { 'SKIP（模式没匹配到用例）' } elseif ($code -eq 0) { 'GREEN（断言没咬住！）' } else { 'RED（符合预期）' })
@@ -411,6 +464,13 @@ if ($notRed) {
   Write-Host ''
   Write-Host ('变异表未通过：' + $notRed.Count + ' 条不是 RED')
   $notRed | Format-Table -AutoSize
+  # CI 可见性：作业日志要鉴权，job summary 不用——把非 RED 的名字与原始输出留在 summary 里。
+  if ($env:GITHUB_STEP_SUMMARY) {
+    $lines = @('## 变异表未通过：' + $notRed.Count + ' 条不是 RED', '')
+    $lines += ($notRed | ForEach-Object { '- `' + $_.变异 + '` → ' + $_.结果 })
+    $lines += @('', '详情见作业日志的「非 RED 详情」段。')
+    Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value ($lines -join "`n")
+  }
   exit 1
 }
 Write-Host ('变异表通过：' + $rows.Count + ' 条全部 RED')

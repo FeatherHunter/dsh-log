@@ -9,8 +9,8 @@
 | 门禁 | 命令 | 当前结果 |
 | --- | --- | --- |
 | 类型 | `node node_modules/typescript/bin/tsc -p tsconfig.json` | exit 0（`.bin/tsc` 垫片坏，必须直调） |
-| 全量测试 | `npm test`（pretest 先 `node build.mjs`） | **176/176，19 套，exit 0** |
-| 变异表 | `pwsh -NoProfile -File scripts/mutation-check.ps1`（随仓提交；调单条用 `-Only M63`） | **68 条，基线先全绿、逐条 RED、0 SKIP/0 GREEN**（见第五节） |
+| 全量测试 | `npm test`（pretest 先 `node build.mjs`） | **180/180，19 套，exit 0** |
+| 变异表 | `pwsh -NoProfile -File scripts/mutation-check.ps1`（随仓提交；调单条用 `-Only M63`） | **72 条，基线先全绿、逐条 RED、0 SKIP/0 GREEN**（见第五节） |
 | 长跑自检 | `node tests/soak.mjs 0 --fast` / `node tests/soak.mjs 6` | 快速模式通过；全量见第四节 |
 | 构建可复现 | `rm -rf dist && node build.mjs` | 产物与删除前逐字节一致 |
 | 发行面 | `npm pack --dry-run` | 93 文件、44 JS + 44 个 `.d.ts`、121.0 kB（体积以当次输出为准） |
@@ -180,6 +180,42 @@
   另一个 `pluginId` 的目录里没有混进本实例的行 → 打印「长跑自检通过」。
 - 用法：`node tests/soak.mjs 0 --fast`（秒级）/ `node tests/soak.mjs 6`（6 分钟）。
   它**不进** `npm test` 的 glob（`tests/*.test.mjs`），属于显式触发的地基检查。
+
+## 四之二、追加路第二轮对抗审查（2026-10-14，审查者 No-Go → 已修）
+
+审查者对**当前**（已加「首触回读验证」的）实现重跑撒谎适配器矩阵，判 No-Go，两条都要修：
+
+- **#1（静默丢数据）验证只做「每份文件第一次」**。适配器「第一次写对、之后不写」时，之后永久走信任分支：
+  探针 `probe-a3.mjs` 实测 60 行只落 5 行、`dropped=0`、`pending=0`、`lastPersistFail=null`。
+  修法：核对要么走 `sizeOf`（stat，每笔追加都核对，O(1)），要么每 8 笔 / 每 256 KB 回读一次；
+  并且把「还没核对过的追加文本」攒在 `unverifiedAppends` 里——核对发现缺口时找得回那几批文本，
+  才能把窗口内消失的行补回来（只记一个记账数字是补不回来的）。
+- **#2（破坏性路径）验证失败后的补救把已落地的字节再写一遍**。`half`（只写一半）实测 20 行落成 31 行、
+  10 行重复，并留下一条永远 `JSON.parse` 不了的粘连行；`wrote-then-throw` 也有重复。
+  修法：核对出「相对基线落了多少字节」后**只补没落地的那一段**；退回读改写的兜底**按行重建**
+  （保留文件里能解析且不属于本批的行，再把本批原文按序补回），这样块与块之间的空洞也不会变成重复行。
+
+修完用**审查者自己的探针**复跑（`probe-a3.mjs` 五种撒谎形态 + `probe-a4.mjs` 逐行体检）：
+
+| 形态 | 修前 | 修后 |
+| --- | --- | --- |
+| `noop`（一直不写） | 20/20 | 20/20、torn 0、dup 0 |
+| `noop-after-first`（后程不写） | **60 行只落 5 行** | **60/60、torn 0、dup 0** |
+| `elsewhere`（写到别处） | 20/20 | 20/20 |
+| `half`（只写一半） | **20 行落成 31 行、10 重复 + 1 条粘连行** | **20/20、torn 0、dup 0** |
+| `wrote-then-throw`（写完再抛） | 20 行 + 10 重复 | 20/20、dup 0 |
+
+回归线：`tests/append-write.test.mjs` 的 ⑨⑩⑪⑫（后程撒谎、只写一半、写完再抛、无 stat 时的核对窗口），
+对应变异 M72–M75（全 RED）。文档同步：README 第 1 节末条与 `log.persist.fail` 的 `reason` 取值
+（新增 `append-partial`）。
+
+**锚点维护与跑表本身的加固（2026-10-14）**：追加路重写后，M63/M65/M66/M67/M68/M72 六条变异的锚点
+全部按新实现改指（旧实现行已不存在，表里一度报 SKIP；以及 M72 原锚点指向「无 stat 才走」的回读分支，
+而用例的适配器有 `sizeOf`，等于没注入——改成「只在首触用 stat 核对」才咬得住）。三处跑表加固：
+①单条超时 **180 秒**，超时记 `TIMEOUT` 并按「不通过」处理（实测有一条变异让用例挂死，旧脚本会一直挂
+到 CI 作业上限）；②基线不再用 glob 实参（`Join-Path` 出来的是反斜杠路径，Node 22 + Windows 下与
+Node 24 行为不同——CI 的变异作业就是这么一直红的），改成显式列举测试文件；③基线或闸门不通过时把
+原始输出写进 `$GITHUB_STEP_SUMMARY`（GitHub 作业日志要鉴权才下得下来，summary 不用）。
 
 ## 五、诚实边界（没做到的）
 
