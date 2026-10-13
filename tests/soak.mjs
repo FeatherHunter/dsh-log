@@ -44,9 +44,11 @@ function makeFlakyFs(store) {
       const prefix = String(target).endsWith('/') ? String(target) : String(target) + '/'
       return [...store.keys()].filter((k) => k.startsWith(prefix))
     },
-    rename() {
-      return undefined // 与真实宿主缺 rename 时同形：不封存，只追加
-    },
+    // 这里**故意不提供 rename**：真实宿主没有 rename 能力时，轮转降级为继续追加。
+    // （2026-10-14 教训：早先这里写的是 `rename() { return undefined }`——一个「声明了却什么都不做」的
+    //  假适配器。库当时照单全收，以为旧文已搬走而清空 existing，下一次写盘把整篇覆盖掉，
+    //  20k 行风暴静默丢了 12500 行。现在封存后要回查目录，这类适配器会被判 rename-not-effective 并降级；
+    //  对应的回归线在 tests/rotation.test.mjs 的 B1d。）
   }
 }
 

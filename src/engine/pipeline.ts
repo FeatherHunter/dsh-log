@@ -694,8 +694,9 @@ export function createPipeline(input: PipelineInput): Pipeline {
           const existingBytes = utf8Bytes(existing)
           const pendingBytes = utf8Bytes(text)
           if (existingBytes > 0 && existingBytes + pendingBytes > config.maxSize) {
-            const sealedName = await sealCurrentFile(logDir, fileName, dayKey)
-            if (sealedName) {
+            const seal = await sealCurrentFile(logDir, fileName, dayKey)
+            if (seal.ok) {
+              const sealedName = seal.sealed
               existing = ''
               await appendAudit(logDir, {
                 ts: Date.now(),
@@ -712,9 +713,10 @@ export function createPipeline(input: PipelineInput): Pipeline {
                 maxSize: config.maxSize
               })
             } else {
-              // 没有 rename 能力（或改名失败）：降级为继续追加。宁可这份文件长过阈值，也不丢一行、
-              // 更不用「复制+截断」冒充原子——那会在中途失败时真丢数据。降级本身记一行 info。
-              extra += buildRowText('info', 'log.rotate.degraded', { file: fileName, reason: 'no-rename' })
+              // 没有 rename 能力、改名抛错、或改完回查不到目标名：降级为继续追加。
+              // 宁可这份文件长过阈值，也不丢一行、更不用「复制+截断」冒充原子——那会在中途失败时真丢数据。
+              // 降级本身记一行 info，reason 如实写是哪一种（no-rename / rename-threw / rename-not-effective）。
+              extra += buildRowText('info', 'log.rotate.degraded', { file: fileName, reason: seal.reason })
             }
           } else if (existingBytes === 0 && pendingBytes > config.maxSize) {
             // 单批自己就超阈值（#23 审查必改 R3）：这次没有旧文可封存，整批原样写下去是唯一不丢行的选择，

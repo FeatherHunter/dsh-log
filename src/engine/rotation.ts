@@ -22,9 +22,12 @@ export interface RotationInput {
   sealSeq: Map<string, number>
 }
 
+/** 封存结果：成功给封存名；失败给原因（调用方按原因记 log.rotate.degraded 并继续追加）。 */
+export type SealOutcome = { ok: true; sealed: string } | { ok: false; reason: string }
+
 export interface Rotation {
   listLogNames: (logDir: string) => Promise<string[] | null>
-  sealCurrentFile: (logDir: string, fileName: string, dayKey: string) => Promise<string | null>
+  sealCurrentFile: (logDir: string, fileName: string, dayKey: string) => Promise<SealOutcome>
   appendAudit: (logDir: string, record: Record<string, unknown>) => Promise<void>
   retainSweep: (logDir: string, fileName: string, dayKey: string) => Promise<string>
 }
@@ -60,9 +63,19 @@ export function createRotation(input: RotationInput): Rotation {
     }
   }
   // 封存当日可写文件：rename 到 `<当日名>.<N>.log`，N 取目录里已有最大序号 + 1（跨实例也准）。
-  // 返回封存后的名字；返回 null＝没有 rename 能力或改名失败（调用方降级为继续追加，不丢行）。
-  async function sealCurrentFile(logDir: string, fileName: string, dayKey: string): Promise<string | null> {
-    if (!fs || typeof fs.rename !== 'function') return null
+  // 返回 { sealed }＝真封存成功；返回 { sealed: null, reason }＝没封成，调用方必须降级为继续追加（绝不丢行）。
+  //
+  // 为什么改名后要**回查目录**（2026-10-14 soak 咬出）：rename 只是「调用方说它成功了」，
+  // 不是「文件真的搬走了」。适配器可能是空实现、可能返回 undefined、也可能忘了 await 自己的异步改名。
+  // 只要目标名没出现在目录里，就当这次封存没发生——否则调用方会以为旧文已搬走而清空 existing，
+  // 下一次写盘把整份文件覆盖成新行，**此前所有行静默消失**（20k 行风暴实测丢了 12500 行、
+  // dropped 仍是 0）。验证失败的代价只是这份文件长过阈值（文档已写明这条降级），比丢整篇便宜得多。
+  async function sealCurrentFile(
+    logDir: string,
+    fileName: string,
+    dayKey: string
+  ): Promise<SealOutcome> {
+    if (!fs || typeof fs.rename !== 'function') return { ok: false, reason: 'no-rename' }
     const names = (await listLogNames(logDir)) || []
     const idx = nextSealIndex(config, names, fileName, sealSeq.get(logDir + '|' + dayKey) || 0)
     const sealedName = sealedNameOf(fileName, idx)
@@ -71,12 +84,15 @@ export function createRotation(input: RotationInput): Rotation {
         await resolveTarget(await joinLogPath(logDir, fileName)),
         await resolveTarget(await joinLogPath(logDir, sealedName))
       )
-      sealSeq.set(logDir + '|' + dayKey, idx)
-      return sealedName
     } catch (e) {
       void e
-      return null
+      return { ok: false, reason: 'rename-threw' }
     }
+    // 回查：列不出目录（能力缺失）也算没封成——不能验证就不许假设它成功。
+    const after = await listLogNames(logDir)
+    if (after === null || after.indexOf(sealedName) < 0) return { ok: false, reason: 'rename-not-effective' }
+    sealSeq.set(logDir + '|' + dayKey, idx)
+    return { ok: true, sealed: sealedName }
   }
   // audit.json：与日志同目录（同桶审计写入，不算共写），逐次追加一行；失败只当没记，绝不影响写盘结果。
   async function appendAudit(logDir: string, record: Record<string, unknown>): Promise<void> {

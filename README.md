@@ -217,7 +217,11 @@ clientLog.log('info', 'my.event', { step: 'started' })   // info 需开关打开
 一天一个可写文件：`<cacheDir>/logs-<pluginId>/YYYY-MM-DD.log`。写盘是「读旧文 + 拼新行 + 全文覆写」（文件服务没有追加原语），所以按天分文件把单次覆写体积封顶在一天之内；再超就在写之前封存。
 
 - **封存**：写这批之前，若「当日文件已有内容 + 这批要写的字节数 > `maxSize`」，先把当日文件**原子改名**成 `YYYY-MM-DD.N.log`（`N` 从 1 起取当前没占用的最小序号），再新建当日文件写这批；封存成功记 `audit.json` 一条 `rotate.seal`，并落一行 info 自监控 `log.rotate.seal`（带 `file`/`sealed`）。
-- **没有 rename 能力就降级**：宿主给的 fs 没有 `rename` 时不封存、继续追加（绝不拿「复制 + 截断」冒充原子改名），并落一行 info 自监控 `log.rotate.degraded`（`reason` 为 `no-rename`）。一行都不丢。
+- **没有 rename 能力、或改名没真生效，就降级**：宿主给的 fs 没有 `rename` 时不封存、继续追加（绝不拿「复制 + 截断」冒充原子改名），并落一行 info 自监控 `log.rotate.degraded`，`reason` 如实写是哪一种：
+  - `no-rename`——适配器根本没提供 rename；
+  - `rename-threw`——rename 抛错；
+  - `rename-not-effective`——rename 没抛错，但**回查目录时目标名不在**（空实现、返回 undefined、忘了 await 自己的异步改名都算）。
+  三种情况都继续追加、一行不丢。为什么改名后一定要回查目录：rename 只代表「调用方说它成功了」，不代表文件真搬走了；照单全收会让下一次写盘把整篇覆盖成新行，此前所有行静默消失（2026-10-14 的 20k 行风暴实测丢了 12500 行而 `dropped` 仍是 0）。
 - **保留按天**：每次写盘前顺手清过期——日期早于「今天往前 `maxDays - 1` 天」的 `.log` 删掉；当日可写文件、开关文件、`audit.json` 永不删。清理记 `audit.json` 一条 `retain.evict`（带 `removed` 列表与 `keptDays`），并落一行 info 自监控 `log.retain.evict`。
 - **单批自己就超阈值**：这批的字节数本身就大于 `maxSize` 时无法封存（没有旧文可封），照常写入并落一行 info 自监控 `log.rotate.oversize`（带 `file`/`bytes`/`maxSize`）——不静默。
 - **审计**：日志目录里的 `audit.json` 逐条记账（`rotate.seal`、`retain.evict`），一行一条 JSON。

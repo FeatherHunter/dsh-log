@@ -144,6 +144,77 @@ describe('#21 轮转与保留', () => {
       const degRows = rows.filter((r) => r.event === 'log.rotate.degraded')
       assert.ok(degRows.length >= 1, '降级本身要留一行 info 自监控')
       assert.equal(degRows[0].level, 'info')
+      assert.equal(degRows[0].fields.reason, 'no-rename', '原因要如实：这里是根本没有 rename 能力')
+      log.store.release()
+    } finally {
+      await rm(cacheDir, { recursive: true, force: true })
+    }
+  })
+
+  // B1d（2026-10-14 soak 咬出的静默丢数据）：适配器**声明了** rename，却是个空实现/同步实现——
+  // 改名说成功、文件其实没搬走。若照单全收，调用方会以为旧文已搬走而清空 existing，
+  // 下一次写盘把整份文件覆盖成新行，此前所有行静默消失（20k 行风暴实测丢 12500 行、dropped 仍是 0）。
+  // 现在封存后要回查目录：目标名没出现就当没封成 → 降级继续追加，一行不丢。
+  it('B1d rename 说成功却没搬走：一行不丢、降级留痕（rename-not-effective）', async () => {
+    const hostMod = await load('host.js')
+    const cacheDir = await makeCacheDir()
+    const dir = path.join(cacheDir, 'logs-liar')
+    try {
+      const fsLyingRename = {
+        resolve: async (p) => ({ path: String(p) }),
+        async readText(t) {
+          try {
+            return await readFile(String(t.path ?? t), 'utf8')
+          } catch (e) {
+            void e
+            return ''
+          }
+        },
+        async writeText(t, text) {
+          const p = String(t.path ?? t)
+          await mkdir(path.dirname(p), { recursive: true })
+          await writeFile(p, String(text), 'utf8')
+        },
+        async mkdir(d) {
+          await mkdir(String(d), { recursive: true })
+        },
+        async unlink(t) {
+          try {
+            await unlink(String(t.path ?? t))
+          } catch (e) {
+            void e
+          }
+        },
+        async listDir(t) {
+          return names(String(t.path ?? t))
+        },
+        // 空实现：不抛错、也不搬走文件（模拟「忘了 await 自己的异步改名」这类适配器）。
+        rename() {
+          return undefined
+        }
+      }
+      const log = hostMod.createHostLog(
+        {
+          fs: fsLyingRename,
+          timer: realTimer(),
+          getCacheDir: async () => cacheDir,
+          getPlatform: async () => null,
+          DEFAULT_CWD: cacheDir
+        },
+        { pluginId: 'liar', prefix: 'liar', maxSize: 400 }
+      )
+      for (let r = 0; r < 5; r += 1) {
+        for (let i = 0; i < 10; i += 1) log.store.log('warn', 'liar.row', { r, i })
+        await log.store.synced()
+      }
+      const files = await names(dir)
+      assert.equal(files.filter((n) => /\.\d+\.log$/.test(n)).length, 0, '没真搬走就不许有封存件')
+      const rows = await readAllRows(dir)
+      assert.equal(rows.filter((r) => r.event === 'liar.row').length, 50, '改名没生效也不许丢一行')
+      const degRows = rows.filter((r) => r.event === 'log.rotate.degraded')
+      assert.ok(degRows.length >= 1, '降级要留一行 info 自监控')
+      assert.equal(degRows[0].fields.reason, 'rename-not-effective', '原因要如实：改名没生效')
+      assert.equal(log.store.getDroppedCount(), 0)
       log.store.release()
     } finally {
       await rm(cacheDir, { recursive: true, force: true })
