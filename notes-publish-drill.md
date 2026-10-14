@@ -2,7 +2,66 @@
 
 这份文件记的是「发出去的是什么」：每发一版，把原始输出与关键数字留在下面，供下一个人复现和核对。文中的字节数、文件数都描述**当时发出去的那一份**，不是当前工作区。0.2.0 是首次公开发布，随 Node 程序入口一起上线；此前只有本地演练（见第四节）。
 
-## 〇.0 dsh-log 0.3.3（已发布，2026-10-15 04:00 +08:00）
+## 〇.0 dsh-log 0.3.4（已发布，2026-10-15 05:24 +08:00）
+
+**状态**：**已发布**。发布后四项核对全过（见本节末）。
+
+**改了什么**（一轮独立审查 review-033 咬出的六处「别把不知道说成知道」，公共接口只增不改；逐条见 README 第 10 节的 0.3.4 条目）：
+
+1. **读不出来的文件不再冒充空文件**：列目录时还在、真读时没了或读不动的文件在摘要里标 `unreadable`（文本写「读不出来」），`export --json` 多一个 `unreadable` 计数。
+2. **启动头取最后一条**：同一目录被多个实例写过时，摘要自述的是**最后**那次启动。
+3. **缺的格子逐个点名**：启动头里没记下来的 `pid`/`startedAt`/`dir` 也进 `unknown`，`pid=0` 不再冒充一个真 pid。
+4. **保留字冲突只数真冲突**：调用方自己传 `fields._shadow` 不再被算成保留字冲突，客户端也不再为此多写一行假的 `log.trace.shadow`。
+5. **启动头幂等**：`writeStartupHeader()` 在同一实例上再调一次不会多写第二行 `host.start`。
+6. **Node 入口的 `os` 不再恒 unknown**：`dsh-log/node` 把写者自己的 `process.platform` 记进 `host.start`。
+
+**发布前门禁（本仓实测，全过）**：
+
+| 门禁 | 结果 |
+|---|---|
+| `node node_modules/typescript/bin/tsc -p tsconfig.json` | exit 0 |
+| `node build.mjs` | 通过（52 JS + 52 `.d.ts`） |
+| `npm test` | **223/223（24 套）**，fail 0 / skipped 0 |
+| `node scripts/mutation-check.ps1`（pwsh 7） | **100 条全 RED、0 SKIP/GREEN**（dist 快照指纹 `7B5FD8EB33E01D28`） |
+| `node scripts/pack-smoke.mjs` | 通过 |
+| `npm pack --dry-run` | `dsh-log-0.3.4.tgz`，109 个文件 |
+
+门禁跑在 `beec238`（提交内容）上，跑完工作区仍干净（`dist` 与入库产物逐字节一致）。**一条教训**：变异表首轮曾咬出 **M101 报 SKIP**——`pattern` 指向的用例名并不存在（客户端三条断言原先挂在一条宽用例里），拆成独立用例后才转 RED；**SKIP 不等于通过**。
+
+**回滚口径**：`npm deprecate dsh-log@0.3.4 '<原因>'`，不做 `unpublish`。
+
+**发布记录（原始输出，2026-10-15 05:24 +08:00）**
+
+```text
++ dsh-log@0.3.4
+package size: 170.6 kB   unpacked size: 502.5 kB   total files: 109
+shasum: bf96adf270860bf424f86d212b3d6f9e6f8c1541
+integrity: sha512-uCG6sLTze5Yjm[...]QmLp76Fklpw2w==
+```
+
+发布者 `feather_wch`，用维护者提供的自动化 token：token 只写进**仓库外**的临时 npmrc（`npm publish --userconfig <临时文件> --registry=https://registry.npmjs.org/`），发完即删；仓库里没有 `.npmrc`，token 没有进库、没有进提交。
+
+源上元数据（直连 `https://registry.npmjs.org/dsh-log/0.3.4`，发布后约 2 分钟可见）：
+
+| 项 | 值 |
+|---|---|
+| `gitHead` | `beec238c5bb467c0fce93f9822e69cc540e32d9f`（= 发布时本仓 HEAD） |
+| `dist-tags.latest` | `0.3.4` |
+| `dist.fileCount` / `unpackedSize` | 109 / 502533 |
+| `dist.shasum` | `bf96adf270860bf424f86d212b3d6f9e6f8c1541` |
+| `dist.integrity` | `sha512-uCG6sLTze5YjmZmLln2KAeCCepsKvzGhnpZmkym/3OKNOsMKH5sA2lunwrLoOfmLxxju3/ZkKQmLp76Fklpw2w==` |
+| `bin` | `dist/cli.js`（源里写成不带 `./`，无 npm 归一化告警） |
+
+**发布后四项核对（全过）**：
+
+1. **gitHead 一致** ✓（上表，等于发布时本仓 HEAD）。
+2. **包内五份文件与仓库逐字一致** ✓（SHA256 前 16 位）：`README.md` `63834EBC5CB673CB`、`INTEGRATION.md` `9F528CBF4DE42471`、`LICENSE` `326012A43D1F139C`、`event-list.template.json` `A024DCBB8AA8408E`、`package.json` `24DAE595A25D92C4`。
+3. **陌生机器装一次**（全新 `--cache` 目录 + 空工程）✓：装到 **0.3.4**、随包 52 个 `.d.ts`；运行冒烟 `ready` → `{"ok":true,"pending":0,"lastPersistFail":null}`、落盘五键 `v=3`；**0.3.4 的三处修复在发出去的包里实跑**——`getHeaderInfo()` 回 `{pid, startedAt, dir, pluginVersion:'9.9.9', os:'win32'}`（0.3.3 时 `os` 恒 `unknown`）、再调一次 `writeStartupHeader()` 后 `host.start` 仍是 **1 行**（幂等）、`dsh-log export` 摘要写 `os=win32` 并把没记下来的 `logSwitch` 点名进「读不出来」；`dsh-log tail` 出人话三行；`--version` = 0.3.4。
+4. **类型冒烟** ✓：消费方 `strict` + `types: []` + `skipLibCheck: false`（不装 `@types/node`）、`module`/`moduleResolution` 都 NodeNext、`type: module`，同时 import 根入口与 `dsh-log/node` → `tsc` exit 0。
+
+> 发布**之后**仓库里又改了一处：README 第 9 节末的「官方源最新」由 0.3.2 改成 0.3.4（连同本节记录一起提交）。所以包内 `README.md` 与**当前**仓库不再逐字一致——这是发版之后的事，下次发版自然会带上（与 0.3.1 那次同一情形）。
+
+## 〇.0′ dsh-log 0.3.3（已发布，2026-10-15 04:00 +08:00）
 
 **状态**：**已发布**。发布后四项核对全过（见本节末「发布记录」）。
 
