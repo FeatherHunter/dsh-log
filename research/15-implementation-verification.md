@@ -221,6 +221,31 @@
 Node 24 行为不同——CI 的变异作业就是这么一直红的），改成显式列举测试文件；③基线或闸门不通过时把
 原始输出写进 `$GITHUB_STEP_SUMMARY`（GitHub 作业日志要鉴权才下得下来，summary 不用）。
 
+### 4d. README 手册化（`c77ea6e`）与第二轮对抗审查（`6dbcc96`）
+
+用户先问「README 能不能以使用手册视角让别人充分知道每一种用法」，补了目录、11 条任务配方、故障排查表、
+公开面速查（四入口 32/23/17/4 逐字）；随后用户要求「从第一性原理出发，对抗式审查 README」，
+独立审查者 `a846f773` 给出 **No-Go（窄口径，只卡 5 条）**，逐条已在 `6dbcc96` 修正：
+
+1. **客户端 `getDroppedCount()` 不是「只数用户行」**（README 术语表与配方 ⑩ 原口径与宿主同款）：
+   客户端把 `log.forward.summary` 汇总行也送进发送路径，宿主拒收时那一行同样被计入丢弃数——
+   实测 1 条用户行 + 持续失败 = `dropped: 2`。文档已如实分口径（宿主只数用户行；客户端含汇总行）。
+   **代码侧没改**：要精确排除得给客户端队列行加 `selfMon` 标记并逐处过滤，属于行为改动，
+   记为 **0.3.1 候选**（不影响数据，只影响诊断计数）。
+2. **§6.1 封存条件漏了「当日文件已有内容 > 0」**：单批自身就超 `maxSize` 时永不封存，只落一条
+   `log.rotate.oversize`（实测 `maxSize=300` + 12 行一批 → 只有 `2026-10-14.log`、无封存件、无 `audit.json`）。
+3. **§2.2 说 `createQuickLog`「自动找目录」** 与 §2.3 的代码事实相反：`src/node.ts:91-93` 明确抛
+   「建 Node 日志库必须给 `cacheDir`」——`cacheDir` 仍必填，省掉的是文件服务与计时器。
+4. **重试次数少算一次**：`LOG_RETRY_MAX_ATTEMPTS = 3` + 退避 500ms×次数 ⇒ 首发 1 次 + 最多 3 次重试 = 4 次发送。
+5. **CI 是两条作业不是三条**（`.github/workflows/ci.yml`:19 `test`、:43 `mutation`；打包冒烟是 `test` 里的一步）。
+
+同轮自审还改掉三处：§12 第 4 条仍写 0.2.x 的 `log.ready()`（0.3.0 是**只读属性**，`log.ready()` 会抛
+「log.ready is not a function」）；§6.1 清空口径（点名某天会连封存件一起删——实测 `removed: 2`）；示例里的
+裸 `return`（README:72 / INTEGRATION:47）。审查者另有一批正向核对为真：导出回包 8 键与
+`bytes === text.length`、查询回包 6 键与「limit 上限 100」、四入口导出名与 §2.2 逐字一致、写失败语义
+（`ready` 回 `{ok:false,pending:3,lastPersistFail}` 且 `dropped` 仍 0，恢复后行全落盘）、轮转成功路径
+（`maxSize=300`、10 批 → `.1..8` + `audit.json` 的 `rotate.seal`，一行不丢）、跨进程追加 16 行 0 撕裂。
+
 ## 五、诚实边界（没做到的）
 
 - **跨进程零保护**：目录占用登记是模块副本级的（`src/engine/dir-lease.ts` 的 `dirHolders`/`dirWaiters`），
