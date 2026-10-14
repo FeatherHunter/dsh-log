@@ -89,7 +89,7 @@ describe('发行面（#27）：类型与入口', () => {
     assert.equal(typeof root.parseLogFileName, 'function')
     assert.equal(typeof root.lintEventFields, 'function')
     assert.equal(root.LOG_FORMAT_VERSION, 3)
-    // 读侧三件（0.4.0）：纯函数，浏览器与 Node 都能用
+    // 读侧三件（0.3.1）：纯函数，浏览器与 Node 都能用
     assert.equal(typeof root.parseLogLine, 'function')
     assert.equal(typeof root.formatRow, 'function')
     assert.equal(typeof root.formatRows, 'function')
