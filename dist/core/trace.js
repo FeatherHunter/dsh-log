@@ -18,12 +18,14 @@ export function isReservedTraceField(key) {
 export function relocateReservedFields(userFields) {
     const fields = {};
     let shadow = null;
+    let reservedMoved = false;
     try {
         for (const k of Object.keys(userFields)) {
             if (isReservedTraceField(k)) {
                 if (!shadow)
                     shadow = {};
                 shadow[k] = userFields[k];
+                reservedMoved = true;
             }
             else if (k === SHADOW_FIELD) {
                 // 调用方自带的 _shadow 不当普通字段：下面是它的合并规则（先来先占，保留字优先级更高）。
@@ -54,7 +56,7 @@ export function relocateReservedFields(userFields) {
     catch (e) {
         void e;
     }
-    return { fields, shadow };
+    return { fields, shadow, reservedMoved };
 }
 export function createHostTrace(input) {
     const genId = input.genId ?? genHex;
@@ -78,8 +80,10 @@ export function createHostTrace(input) {
             const out = relocated.fields;
             if (relocated.shadow) {
                 out[SHADOW_FIELD] = relocated.shadow;
-                shadowWarns += 1;
             }
+            // 只数「调用方传了保留字」的冲突；只带 _shadow 不算（见 RelocatedFields.reservedMoved）。
+            if (relocated.reservedMoved)
+                shadowWarns += 1;
             out.traceId = traceId;
             out.spanId = spanId;
             const current = seq;

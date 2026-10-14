@@ -431,7 +431,7 @@ npx dsh-log export ./logs-my-plugin > ticket.txt    # 摘要 + 原始行：贴�
 npx dsh-log export ./logs-my-plugin --json | jq .rows   # 只要摘要对象（给脚本用；要行用 tail --json）
 ```
 
-输出两段：**目录摘要**（目录、文件清单与字节数、行数、时间范围、级别与事件分布、启动头、开关状态、哪些格子读不出来）+ **原始行**（原样，一个字节都不改）。摘要里的 `unknown` 是**如实**：没记过就说没记过——它绝不会拿「跑这条命令那个进程」的 cwd / 版本 / 平台来顶替（把读者的环境写成写者的事实，比留空更糟）。`export` 的语义是原样交出整个目录，所以 `--level`/`--since`/`--trace`/`-n`/`-f` 传给它**会当场报错**，不静默忽略。
+输出两段：**目录摘要**（目录、文件清单与字节数、行数、时间范围、级别与事件分布、启动头、开关状态、哪些格子读不出来、哪些文件读不出来）+ **原始行**（原样，一个字节都不改）。摘要里的 `unknown` 是**如实**：没记过就说没记过——它绝不会拿「跑这条命令那个进程」的 cwd / 版本 / 平台来顶替（把读者的环境写成写者的事实，比留空更糟）。同一条原则也管文件：列目录时还在、真读时没了或读不动（轮转、保留清理、别的写者动过）的文件标 `unreadable`（文本里写**读不出来**），不写成「0 字节 0 行」冒充空文件——`0 字节` 会让人以为没事，缺口得让人看见。`export` 的语义是原样交出整个目录，所以 `--level`/`--since`/`--trace`/`-n`/`-f` 传给它**会当场报错**，不静默忽略。
 
 **目录怎么自己说清「谁写的」**：Node 入口（`dsh-log/node`）建库时自动写一行 `host.start`（常驻事件，开关关着也落）：
 
@@ -439,7 +439,7 @@ npx dsh-log export ./logs-my-plugin --json | jq .rows   # 只要摘要对象（�
 {"v":3,"ts":1791980000000,"level":"info","event":"host.start","fields":{"pid":41232,"startedAt":"2026-10-15T03:00:00.000Z","dir":"D:\\cache","pluginVersion":"1.2.3","os":"win32"}}
 ```
 
-`pluginVersion` 由建库配置传入（见第 4 节）、`os` 由平台对象报出，拿不到就不写这个键。宿主入口（`dsh-log/host`）是同步建库，要自述行就显式调一次 `await store.writeStartupHeader()`。
+`pluginVersion` 由建库配置传入（见第 4 节）、`os` 由平台对象报出，拿不到就不写这个键。宿主入口（`dsh-log/host`）是同步建库，要自述行就显式调一次 `await store.writeStartupHeader()`；它是**幂等**的——同一实例再调一次不会多写第二行（启动头表达的是「这一次启动」，要换内容就换实例）。
 
 ## 4. 配置默认值派生（#558 冻结）
 
@@ -627,7 +627,7 @@ CI 已把上面这些固化成**两条作业**（`.github/workflows/ci.yml`）�
 
 快照门禁只有黄/红两档（#18 Q6）：黄 warn——清单新增字段但快照未更新（`tests/snapshot.test.mjs` 只警告不判红，跑 `node tests/update-snapshots.mjs` 一键更新即转绿，不阻排障）；红 error——未知事件名、envelope 非法（落盘行五键 `{v,ts,level,event,fields}` 中 `v` 不为 3 或形状不对）、事件总数突变（与 `tests/event-snapshots/_baseline.json` 比 ±超 5 且 `tests/event-snapshots/CHANGELOG.md` 无说明；红的是“无 changelog”不是字段本身，补说明后跑更新命令即转绿）。事件条数就记在 `tests/event-snapshots/` 这套快照里，别在文档里抄数字。
 
-`npm test` 的用例清单来自 `package.json` 的 `test` 脚本（上面那二十四个文件、共 **217 例**；`pretest` 会先跑 `node build.mjs`，所以测试一定在最新产物上跑）。类型检查：`npm run typecheck`（脚本内已直调 `node node_modules/typescript/bin/tsc`，绕开仓库里那个指向失效路径的 `.bin/tsc` 垫片）。发行面那两套（`release-surface`、`consumer-types`）会把包按 junction 装进临时工程、用真 tsc 编译一次，所以「类型能不能被消费者用上」是门禁里跑出来的结论，不是文档里的承诺。
+`npm test` 的用例清单来自 `package.json` 的 `test` 脚本（上面那二十四个文件、共 **223 例**；`pretest` 会先跑 `node build.mjs`，所以测试一定在最新产物上跑）。类型检查：`npm run typecheck`（脚本内已直调 `node node_modules/typescript/bin/tsc`，绕开仓库里那个指向失效路径的 `.bin/tsc` 垫片）。发行面那两套（`release-surface`、`consumer-types`）会把包按 junction 装进临时工程、用真 tsc 编译一次，所以「类型能不能被消费者用上」是门禁里跑出来的结论，不是文档里的承诺。
 
 ### 9.1 源码分层（贡献者视角）
 
@@ -694,6 +694,17 @@ CI 已把上面这些固化成**两条作业**（`.github/workflows/ci.yml`）�
 3. **`dsh-log export`**：交日志的第二个子命令——摘要 + 原始行，自包含；读不出来的格子如实写 `unknown`，**不拿读者环境顶替**（见 3.2）。顺带把「目录发现不要求 `logs-` 前缀」写成契约并补了两条回归线。
 
 升级方式：`npm i dsh-log@0.3.3`；想让自己插件的日志目录自述版本，就在建库配置里加 `pluginVersion: '<你的版本>'`。
+
+**0.3.4（2026-10-15）**：一轮独立审查咬出的六处**诚实性/口径**问题（公共接口只增不改，老代码不用动）——共同点都是「别把不知道说成知道」：
+
+1. **读不出来的文件不再冒充空文件**：列目录时还在、真读时没了或读不动的文件（轮转、保留清理、别的写者动过）在摘要里标 `unreadable`（文本写**读不出来**），不再写成「0 字节 0 行」；`export --json` 多一个 `unreadable` 计数（见 3.2）。
+2. **启动头取最后一条**：同一目录被多个实例写过时，摘要自述的是**最后**那次启动（最贴近现状），不再是第一条。
+3. **缺的格子逐个点名**：启动头里没记下来的 `pid`/`startedAt`/`dir` 也进 `unknown`（原先只点 `pluginVersion`/`os`）——`pid=0` 不再冒充一个真 pid。
+4. **保留字冲突只数真冲突**：调用方自己传 `fields._shadow`（自己归档自己的字段）不再被算成保留字冲突，客户端也不再为此多写一行 `log.trace.shadow`（那句话在此时是假的）；`store.trace().shadowWarns` 与客户端同口径。
+5. **启动头幂等**：`writeStartupHeader()` 在同一实例上再调一次不会多写第二行 `host.start`（启动头表达的是「这一次启动」，要换内容就换实例）。
+6. **Node 入口的 `os` 不再恒 unknown**：`dsh-log/node` 把写者自己的 `process.platform` 写进 `host.start`（写这一刻可知的真事实，不是拿读者环境顶替）。
+
+升级方式：`npm i dsh-log@0.3.4`，现有代码不需要改。
 
 ## 11. 安全声明与许可证
 

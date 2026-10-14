@@ -51,7 +51,7 @@ integrity: sha512-ymrfYbQV76A7x[...]5e9EBiNKMM6zA==
 3. **陌生机器装一次**（全新 `--cache` 目录 + 空工程）✓：装到 **0.3.3**、52 个 `.d.ts`；运行时冒烟 `await quick.ready` → `{"ok":true,"pending":0,"lastPersistFail":null}`、落盘五键 `v=3`；**0.3.3 新能力实跑**——`store.trace()` 写的行 `fields` 带 `traceId`(16 hex)/`spanId`(8 hex)/`seq`，`getHeaderInfo()` 回 `{pid,startedAt,dir,pluginVersion:'9.9.9',os:''}`，`host.start` 行里带 `pluginVersion`；`dsh-log tail` 出人话三行；`dsh-log export` 出摘要（`启动头: … pluginVersion=9.9.9 os=unknown`、`读不出来: os, logSwitch`）+ 原始行；`--version` = 0.3.3；`npx dsh-log --version` = 0.3.3（bin 映射可用）。
 4. **类型冒烟** ✓：消费方 `strict` + `types: []` + `skipLibCheck: false`（不装 `@types/node`），`moduleResolution: NodeNext` + `type: module`，同时 import 根入口与 `dsh-log/node` → `tsc` exit 0。
 
-**已知（0.3.4 候选）**：`dsh-log/node` 没给 `getPlatform`，所以它写出的目录 `os` 恒为 `unknown`（写者自己的 `process.platform` 在写这一刻是可知的真事实，不算「读者环境顶替」）；另外 `writeStartupHeader()` 不幂等，node 入口使用者再手调一次会写出第二行 `host.start`。
+**已知（0.3.4 候选）**：`dsh-log/node` 没给 `getPlatform`，所以它写出的目录 `os` 恒为 `unknown`（写者自己的 `process.platform` 在写这一刻是可知的真事实，不算「读者环境顶替」）；另外 `writeStartupHeader()` 不幂等，node 入口使用者再手调一次会写出第二行 `host.start`。**这两条都已在 0.3.4 修掉**（连同独立审查 review-033 咬出的另外几处诚实性/口径问题），见 README 第 10 节的 0.3.4 条目。
 ## 〇.1 dsh-log 0.3.2（已发布，2026-10-15 01:37 +08:00）
 
 **状态**：已发布到官方源，`dist-tags.latest` = **0.3.2**。发布者 `feather_wch`（自动化 token，只写进 `%TEMP%` 的临时 npmrc、`npm publish --userconfig <该文件>`，发完即删——仓库里没有 `.npmrc`）。

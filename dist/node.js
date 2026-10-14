@@ -69,7 +69,7 @@ export async function createNodeHostLog(deps, configInput) {
     // 在建库当场就抛中文错（#19 隔离，P0），赶在任何一行落盘之前判定；写完不释放的常驻占位由 release() 交还。
     // realpath 先归一：同一目录的不同写法（`base`、`base/.`、符号链接）必须撞同一个键，
     // 否则两个实例各拿一把锁去写同一个文件，后落盘的那次整篇快照会静默覆盖前一次。
-    { fs, timer, getCacheDir: () => cacheDir, syncCacheDir: realCacheDir(cacheDir), DEFAULT_CWD: cacheDir }, configInput);
+    { fs, timer, getCacheDir: () => cacheDir, syncCacheDir: realCacheDir(cacheDir), DEFAULT_CWD: cacheDir, getPlatform: () => ({ os: process.platform }) }, configInput);
     const store = hostLog.store;
     // 把上次留下的开关读回来。
     //

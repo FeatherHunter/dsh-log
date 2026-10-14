@@ -4,6 +4,12 @@ export declare const SHADOW_FIELD = "_shadow";
 export interface RelocatedFields {
     fields: Record<string, unknown>;
     shadow: Record<string, unknown> | null;
+    /**
+     * 调用方**真的传了保留字**（traceId/spanId/seq）而被搬走——只有这种情况才算一次「保留字冲突」。
+     * 只带 `_shadow`（自己归档自己的字段）不算冲突：那不是我们搬的，计数跟着它涨会把
+     * 「冲突次数」变成「用过 _shadow 的次数」。
+     */
+    reservedMoved: boolean;
 }
 export declare function isReservedTraceField(key: string): boolean;
 export declare function relocateReservedFields(userFields: Record<string, unknown>): RelocatedFields;
@@ -20,7 +26,7 @@ export interface HostTraceInput {
 export interface HostTrace {
     readonly traceId: string;
     readonly spanId: string;
-    /** 保留字冲突次数（冲突值搬进 `fields._shadow`；宿主侧不额外写诊断行，行本身就是证据）。 */
+    /** 保留字冲突次数：只数调用方**真的传了** traceId/spanId/seq 而被搬进 `fields._shadow` 的次数（只带 `_shadow` 不算）。 */
     readonly shadowWarns: number;
     /** 记一行：自动带 traceId/spanId/seq。被开关挡下的行**不**消耗 seq（与客户端同口径）。 */
     log: (level: string, event: string, fields?: Record<string, unknown>) => LogOutcome;

@@ -377,6 +377,10 @@ export function createLogStore(deps: LogStoreDeps, configInput?: HostLogConfigIn
   // 第三方只拿到目录时靠它才知道该找谁（research/18 §2.2）。
   async function writeStartupHeader(): Promise<StartupHeader | null> {
     try {
+      // 幂等：同一个实例只写一行 `host.start`。`dsh-log/node` 建库时已经自动写过一次，
+      // 使用者照着文档再手调一次不该多出一行（多出来的自述行会让「这目录被谁写过」变得含糊）。
+      // 要换内容就换实例——启动头表达的是「这一次启动」，本来就不该在一个实例里改。
+      if (headerInfo !== null) return headerInfo
       const dir = typeof getCacheDir === 'function' ? await getCacheDir() : null
       const pid = currentPid()
       let osName = ''

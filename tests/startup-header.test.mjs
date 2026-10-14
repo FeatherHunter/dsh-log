@@ -161,4 +161,28 @@ describe('目录自述：启动头（host.start）', () => {
       await rm(cacheDir, { recursive: true, force: true })
     }
   })
+
+  it('Node 入口的启动头带 os（写者自己的 process.platform），且再手调一次不会写出第二行', async () => {
+    const mod = await fresh('node.js')
+    const cacheDir = await makeCacheDir()
+    try {
+      const log = await mod.createNodeHostLog({ cacheDir }, { pluginId: 'hdr-os', prefix: 'hdr-os' })
+      await log.store.synced()
+      const before = await readRows(cacheDir, 'logs-hdr-os')
+      const headers = before.filter((r) => r.event === 'host.start')
+      assert.equal(headers.length, 1, '入口自动写一行')
+      assert.equal(headers[0].fields.os, process.platform, 'os 是写者自己的平台（写这一刻可知的真事实，不是读者环境）')
+      assert.equal(log.store.getHeaderInfo().os, process.platform)
+      assert.ok(headers[0].fields.os.length > 0, 'os 不许为空')
+
+      // 幂等：使用者照着文档再手调一次，不该多出一行自述（多出来的会让「谁写过这个目录」变含糊）
+      await log.store.writeStartupHeader()
+      await log.store.synced()
+      const after = await readRows(cacheDir, 'logs-hdr-os')
+      assert.equal(after.filter((r) => r.event === 'host.start').length, 1, '同一实例只写一行 host.start')
+      log.store.release()
+    } finally {
+      await rm(cacheDir, { recursive: true, force: true })
+    }
+  })
 })

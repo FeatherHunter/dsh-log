@@ -50,6 +50,8 @@ declare const process: {
   env: Record<string, string | undefined>
   exit(code?: number): void
   exitCode?: number
+  /** 平台名（`win32`/`linux`/`darwin`…）：入口把它写进 `host.start` 的 `os` 字段。 */
+  platform: string
   stdout: { write(text: string): boolean; isTTY?: boolean }
   stderr: { write(text: string): boolean }
 }

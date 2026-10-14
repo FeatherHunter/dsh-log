@@ -17,6 +17,12 @@ export const SHADOW_FIELD = '_shadow'
 export interface RelocatedFields {
   fields: Record<string, unknown>
   shadow: Record<string, unknown> | null
+  /**
+   * 调用方**真的传了保留字**（traceId/spanId/seq）而被搬走——只有这种情况才算一次「保留字冲突」。
+   * 只带 `_shadow`（自己归档自己的字段）不算冲突：那不是我们搬的，计数跟着它涨会把
+   * 「冲突次数」变成「用过 _shadow 的次数」。
+   */
+  reservedMoved: boolean
 }
 
 export function isReservedTraceField(key: string): boolean {
@@ -28,11 +34,13 @@ export function isReservedTraceField(key: string): boolean {
 export function relocateReservedFields(userFields: Record<string, unknown>): RelocatedFields {
   const fields: Record<string, unknown> = {}
   let shadow: Record<string, unknown> | null = null
+  let reservedMoved = false
   try {
     for (const k of Object.keys(userFields)) {
       if (isReservedTraceField(k)) {
         if (!shadow) shadow = {}
         shadow[k] = userFields[k]
+        reservedMoved = true
       } else if (k === SHADOW_FIELD) {
         // 调用方自带的 _shadow 不当普通字段：下面是它的合并规则（先来先占，保留字优先级更高）。
         continue
@@ -57,7 +65,7 @@ export function relocateReservedFields(userFields: Record<string, unknown>): Rel
   } catch (e) {
     void e
   }
-  return { fields, shadow }
+  return { fields, shadow, reservedMoved }
 }
 
 // ---- 宿主侧链上下文（0.4.0：把 #24 的约定补齐到宿主写入路径） --------------------------
@@ -87,7 +95,7 @@ export interface HostTraceInput {
 export interface HostTrace {
   readonly traceId: string
   readonly spanId: string
-  /** 保留字冲突次数（冲突值搬进 `fields._shadow`；宿主侧不额外写诊断行，行本身就是证据）。 */
+  /** 保留字冲突次数：只数调用方**真的传了** traceId/spanId/seq 而被搬进 `fields._shadow` 的次数（只带 `_shadow` 不算）。 */
   readonly shadowWarns: number
   /** 记一行：自动带 traceId/spanId/seq。被开关挡下的行**不**消耗 seq（与客户端同口径）。 */
   log: (level: string, event: string, fields?: Record<string, unknown>) => LogOutcome
@@ -118,8 +126,9 @@ export function createHostTrace(input: HostTraceInput): HostTrace {
       const out = relocated.fields
       if (relocated.shadow) {
         out[SHADOW_FIELD] = relocated.shadow
-        shadowWarns += 1
       }
+      // 只数「调用方传了保留字」的冲突；只带 _shadow 不算（见 RelocatedFields.reservedMoved）。
+      if (relocated.reservedMoved) shadowWarns += 1
       out.traceId = traceId
       out.spanId = spanId
       const current = seq

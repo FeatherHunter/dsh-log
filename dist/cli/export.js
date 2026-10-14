@@ -26,17 +26,17 @@ export function switchCandidates(dir) {
     // 目录名不是本包的派生形状：不去猜，摘要里如实写 unknown。
     return [];
 }
-/** 把一个日志目录收成「摘要 + 原始行」；读不到的文件按 0 行记，绝不抛错。 */
+/** 把一个日志目录收成「摘要 + 原始行」；读不到的文件如实标 `unreadable`，绝不抛错、也不冒充空文件。 */
 export async function collectExport(entry) {
     const accumulator = createLogDigest(entry.dir);
     const rows = [];
     for (const file of entry.files) {
         const text = await readTextFile(entry.dir + '/' + file.name);
-        if (text === null) {
-            accumulator.addFile(file.name, '');
-            continue;
-        }
+        // text 为 null 时**不要**喂空串：那会把「读不出来」写成「0 字节空文件」，
+        // 收日志的人看到 0 字节会以为没事。让摘要自己去标 unreadable。
         accumulator.addFile(file.name, text);
+        if (text === null)
+            continue;
         const { lines } = splitLogLines(text);
         for (const line of lines)
             if (line.trim() !== '')

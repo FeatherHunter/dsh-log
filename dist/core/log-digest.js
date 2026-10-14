@@ -60,7 +60,14 @@ export function createLogDigest(dir) {
     let header = null;
     let logSwitch = null;
     let switchSeen = false;
+    let unreadable = 0;
     function addFile(name, text) {
+        if (text === null) {
+            // 读不出来 ≠ 空文件：如实标出来，既不进 `rows` 也不进 `bad`（我们根本不知道里面有几行）。
+            files.push({ name: name, bytes: 0, rows: 0, bad: 0, unreadable: true });
+            unreadable += 1;
+            return;
+        }
         let fileRows = 0;
         let fileBad = 0;
         for (const line of text.split('\n')) {
@@ -97,6 +104,14 @@ export function createLogDigest(dir) {
         if (header === null)
             unknown.push('header');
         else {
+            // 启动头里每个「没记下来」的格子都点名：文本会把它们渲染成 0/unknown，
+            // 机器只读 unknown 列表，两边必须说同一件事（别让 `pid=0` 冒充一个真 pid）。
+            if (header.pid === 0)
+                unknown.push('pid');
+            if (header.startedAt === '')
+                unknown.push('startedAt');
+            if (header.dir === '')
+                unknown.push('dir');
             if (header.pluginVersion === '')
                 unknown.push('pluginVersion');
             if (header.os === '')
@@ -109,6 +124,7 @@ export function createLogDigest(dir) {
             files: files.slice(),
             rows: rows,
             bad: bad,
+            unreadable: unreadable,
             byLevel: countOf(byLevel),
             byEvent: countOf(byEvent),
             firstTs: firstTs,
@@ -133,7 +149,12 @@ export function formatLogDigest(digest) {
     lines.push('目录: ' + (digest.dir || 'unknown'));
     lines.push('文件: ' + digest.files.length + ' 个（' + digest.rows + ' 行可解析，' + digest.bad + ' 行读不出）');
     for (const file of digest.files) {
-        lines.push('  - ' + file.name + '  ' + file.bytes + ' 字节  ' + file.rows + ' 行');
+        if (file.unreadable === true) {
+            lines.push('  - ' + file.name + '  **读不出来**（列目录时还在，读的时候没了或读不动：轮转/清理/别的写者动过）');
+        }
+        else {
+            lines.push('  - ' + file.name + '  ' + file.bytes + ' 字节  ' + file.rows + ' 行');
+        }
     }
     if (digest.firstTs !== null && digest.lastTs !== null) {
         // 本地时区（与 `tail` 的渲染同一份格式函数）；精确时间在原始行里，摘要只负责「大概什么时候」。
@@ -156,6 +177,10 @@ export function formatLogDigest(digest) {
             ' os=' + (h.os || 'unknown'));
     }
     lines.push('开关: ' + (digest.logSwitch === null ? 'unknown' : JSON.stringify(digest.logSwitch)));
+    if (digest.unreadable > 0) {
+        const names = digest.files.filter((f) => f.unreadable === true).map((f) => f.name);
+        lines.push('读不出来的文件: ' + digest.unreadable + ' 个（' + names.join(', ') + '）——它们里面有几行我们不知道');
+    }
     lines.push('读不出来: ' + (digest.unknown.length === 0 ? '（无）' : digest.unknown.join(', ') + '（unknown 就是没记下来，不用读者环境顶替）'));
     return lines.join('\n');
 }

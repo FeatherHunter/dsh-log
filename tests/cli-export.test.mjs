@@ -14,7 +14,7 @@ import path from 'node:path'
 import { execFile } from 'node:child_process'
 import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { promisify } from 'node:util'
 
 const run = promisify(execFile)
@@ -114,7 +114,7 @@ describe('CLI export：把目录交出去', () => {
       assert.equal(res.code, 0, res.stderr)
       const parsed = JSON.parse(res.stdout.trim())
       assert.deepEqual(Object.keys(parsed).sort(), [
-        'bad', 'byEvent', 'byLevel', 'dir', 'files', 'firstTs', 'header', 'lastTs', 'logSwitch', 'rows', 'unknown'
+        'bad', 'byEvent', 'byLevel', 'dir', 'files', 'firstTs', 'header', 'lastTs', 'logSwitch', 'rows', 'unknown', 'unreadable'
       ])
       assert.equal(parsed.rows, 2)
       assert.equal(parsed.header.pluginVersion, '2.0.0')
@@ -185,6 +185,69 @@ describe('CLI export：把目录交出去', () => {
     } finally {
       await rm(cacheDir, { recursive: true, force: true })
     }
+  })
+
+  it('读不出来的文件不许冒充空文件：标 unreadable、进摘要点名，原始行里不出现', async () => {
+    const { collectExport } = await import(pathToFileURL(path.join(PKG_DIR, 'dist', 'cli', 'export.js')).href)
+    const { formatLogDigest } = await import(pathToFileURL(path.join(PKG_DIR, 'dist', 'core', 'log-digest.js')).href)
+    const cacheDir = await makeCacheDir()
+    try {
+      await mkdir(path.join(cacheDir, 'logs-gone'), { recursive: true })
+      const real = path.join(cacheDir, 'logs-gone', '2026-10-15.log')
+      await writeFile(real, rowOf(1791980000000, 'warn', 'gone.real', {}) + '\n', 'utf8')
+      const entry = {
+        dir: path.join(cacheDir, 'logs-gone'),
+        files: [
+          { name: '2026-10-14.log', date: '2026-10-14', seq: 0, sealed: false, policy: 'daily' },
+          { name: '2026-10-15.log', date: '2026-10-15', seq: 0, sealed: false, policy: 'daily' }
+        ]
+      }
+      const collected = await collectExport(entry)
+      const missing = collected.digest.files.find((f) => f.name === '2026-10-14.log')
+      assert.equal(missing.unreadable, true, '读不出来必须标出来（别写成 0 字节空文件）')
+      assert.equal(missing.bytes, 0)
+      assert.equal(collected.digest.unreadable, 1)
+      assert.equal(collected.digest.rows, 1, '只数真读到的行')
+      assert.equal(collected.rows.length, 1)
+      const text = formatLogDigest(collected.digest)
+      assert.ok(text.indexOf('**读不出来**') >= 0, text)
+      assert.ok(text.indexOf('读不出来的文件: 1 个（2026-10-14.log）') >= 0, text)
+      // 真的空文件（0 字节）不该被误标：它是事实，不是缺口。
+      assert.equal(collected.digest.files.find((f) => f.name === '2026-10-15.log').unreadable, undefined)
+    } finally {
+      await rm(cacheDir, { recursive: true, force: true })
+    }
+  })
+
+  it('摘要的 bytes 是 UTF-8 字节（不是字符串长度）；unknown 逐个点名启动头里缺的每个格子', async () => {
+    const { createLogDigest, formatLogDigest } = await import(pathToFileURL(path.join(PKG_DIR, 'dist', 'core', 'log-digest.js')).href)
+    const row = JSON.stringify({ v: 3, ts: 1791980000000, level: 'error', event: 'cn.row', fields: { message: '网络异常：连接超时' } })
+    const acc = createLogDigest('D:/x/logs-demo')
+    acc.addFile('2026-10-15.log', row + '\n')
+    acc.setSwitch(null)
+    const digest = acc.finish()
+    assert.equal(digest.files[0].bytes, Buffer.byteLength(row + '\n', 'utf8'), 'bytes 必须是 UTF-8 字节数')
+    assert.ok(digest.files[0].bytes > (row + '\n').length, '含中文时字节数必须大于字符数（否则就是按 length 算的）')
+
+    // 启动头只记了 pluginVersion：其余格子必须逐个进 unknown（别拿 pid=0 / unknown 冒充已记）
+    const acc2 = createLogDigest('D:/x/logs-demo')
+    acc2.addFile('2026-10-15.log', JSON.stringify({ v: 3, ts: 1, level: 'info', event: 'host.start', fields: { pluginVersion: '1.2.3' } }) + '\n')
+    acc2.setSwitch('{"enabled":false}')
+    const d2 = acc2.finish()
+    assert.deepEqual(d2.unknown, ['pid', 'startedAt', 'dir', 'os'], '缺的格子逐个点名，pluginVersion 记下来了就不点')
+    assert.equal(d2.header.pluginVersion, '1.2.3')
+    assert.ok(formatLogDigest(d2).indexOf('dir=unknown') >= 0)
+  })
+
+  it('同一目录被多个实例写过时，启动头取**最后**一条（最贴近现状）', async () => {
+    const { createLogDigest } = await import(pathToFileURL(path.join(PKG_DIR, 'dist', 'core', 'log-digest.js')).href)
+    const acc = createLogDigest('D:/x/logs-demo')
+    acc.addFile('2026-10-15.1.log', JSON.stringify({ v: 3, ts: 1, level: 'info', event: 'host.start', fields: { pid: 111, startedAt: 'a', dir: 'd', pluginVersion: '1.0.0', os: 'win32' } }) + '\n')
+    acc.addFile('2026-10-15.log', JSON.stringify({ v: 3, ts: 2, level: 'info', event: 'host.start', fields: { pid: 222, startedAt: 'b', dir: 'd', pluginVersion: '2.0.0', os: 'win32' } }) + '\n')
+    acc.setSwitch(null)
+    const digest = acc.finish()
+    assert.equal(digest.header.pid, 222, '取最后一条（写序在后的那次启动）')
+    assert.equal(digest.header.pluginVersion, '2.0.0')
   })
 
   it('多个目录：默认各出一段（都带自己的目录名）；--json 每目录一行（NDJSON）', async () => {

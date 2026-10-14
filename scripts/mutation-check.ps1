@@ -410,6 +410,43 @@ export interface LogTimer {" }
      tests = 'cli-export'; pattern = '只读：跑完 export'
      from = "        const { lines } = splitLogLines(text);"
      to   = "        const lines = text.split('\n');" }
+
+  # ---- 0.3.4：独立审查（review-033）咬出的六处诚实性/口径问题（每条都对着一条回归线） ----
+  # M97 读不出来的文件被写成「0 字节空文件」→ 收日志的人以为没事（列目录时还在、读时没了）。
+  @{ name = 'M97 读不出来的文件冒充空文件（丢掉 unreadable 标记）'; file = 'core/log-digest.js'
+     tests = 'cli-export'; pattern = '读不出来的文件不许冒充空文件'
+     from = "            files.push({ name: name, bytes: 0, rows: 0, bad: 0, unreadable: true });"
+     to   = "            files.push({ name: name, bytes: 0, rows: 0, bad: 0 });" }
+  # M98 启动头取第一条 → 多实例写过的目录会自述成「最早那次启动」（现状最贴近的应是最后一条）。
+  @{ name = 'M98 启动头取第一条（多实例写过的目录应取最后一条）'; file = 'core/log-digest.js'
+     tests = 'cli-export'; pattern = '启动头取'
+     from = "            if (row.event === 'host.start')"
+     to   = "            if (row.event === 'host.start' && header === null)" }
+  # M99 缺的格子不点名 → 文本写 pid=0/unknown，机器读 unknown 却以为「dir 记下来了」。
+  @{ name = 'M99 缺的格子不点名（pid=0 冒充真 pid）'; file = 'core/log-digest.js'
+     tests = 'cli-export'; pattern = 'unknown 逐个点名'
+     from = "            if (header.pid === 0)"
+     to   = "            if (false)" }
+  # M100 宿主侧把「只带 _shadow」也算成保留字冲突 → 冲突计数变成「用过 _shadow 的次数」。
+  @{ name = 'M100 宿主侧影子计数把「只带 _shadow」也算成冲突'; file = 'core/trace.js'
+     tests = 'host-trace'; pattern = '影子计数只数'
+     from = "            if (relocated.reservedMoved)"
+     to   = "            if (relocated.shadow)" }
+  # M101 客户端同样把「只带 _shadow」算成冲突，还多写一行影子告警（那句话在此时是假的）。
+  @{ name = 'M101 客户端影子计数把「只带 _shadow」也算成冲突（连影子行一起写）'; file = 'client/write.js'
+     tests = 'runtime-t7'; pattern = '只带 _shadow'
+     from = "        if (shadow && relocated.reservedMoved) {"
+     to   = "        if (shadow) {" }
+  # M102 启动头不幂等 → Node 入口使用者照文档再手调一次就多写一行自述。
+  @{ name = 'M102 启动头不幂等（手调一次多写一行自述）'; file = 'store.js'
+     tests = 'startup-header'; pattern = '再手调一次不会写出第二行'
+     from = "            if (headerInfo !== null)"
+     to   = "            if (false)" }
+  # M103 Node 入口不给 getPlatform → 它写出的每个目录 os 恒 unknown（写者自己的平台本是可知事实）。
+  @{ name = 'M103 Node 入口不给 getPlatform（目录自述的 os 恒 unknown）'; file = 'node.js'
+     tests = 'startup-header'; pattern = '带 os（写者自己的'
+     from = "DEFAULT_CWD: cacheDir, getPlatform: () => ({ os: process.platform }) }"
+     to   = "DEFAULT_CWD: cacheDir }" }
   # M85 对齐时把 ANSI 转义也算进宽度 → 上色后整个人话列位推歪。
   @{ name = 'M85 对齐把 ANSI 算进宽度'; file = 'core/read-row.js'
      tests = 'format-row'; pattern = '渲染：默认不上色'

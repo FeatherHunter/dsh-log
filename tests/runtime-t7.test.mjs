@@ -401,6 +401,25 @@ describe('T7 运行时行为（#18 队列口径 + 0.3.0 追踪分流）', () => 
     assert.equal(clean.fields.keep, 'ok')
     assert.equal(logger.why().shadowWarns, 1, '无冲突不加影子计数')
   })
+
+  // 单独立一条、且用例名带「只带 _shadow」：变异表 M101 是按用例名找线的（pattern 字面匹配），
+  // 挂在上一条宽用例里会让变异「根本没跑就报 SKIP」——那等于这条防线没有证据。
+  it('只带 _shadow：调用方自己归档的字段不算保留字冲突，也不写影子行', async () => {
+    const logger = createClientLog(
+      { storage: makeStorage(), timer: makeManualTimer(), host: makeQuietHost() },
+      { pluginId: 'wf', prefix: 'wf' }
+    )
+    // 只带 _shadow（调用方自己归档自己的字段）**不算保留字冲突**：不计数、也不该多一行
+    // 「被让位的是这些键」的影子告警行（那不是我们搬的）。值本身照旧保留。
+    logger.log('error', 'self-shadow', { _shadow: { mine: 1 }, keep: 2 })
+    const selfRow = logger.logQueue.find((r) => r.event === 'self-shadow')
+    assert.ok(selfRow, '主行照落，不被拒收')
+    assert.deepEqual(selfRow.fields._shadow, { mine: 1 }, '调用方自己的 _shadow 原样保留')
+    assert.equal(selfRow.fields.keep, 2)
+    assert.equal(logger.why().shadowWarns, 0, '只带 _shadow 不加冲突计数')
+    assert.equal(logger.logQueue.filter((r) => r.event === 'log.trace.shadow').length, 0, '也不该多出影子告警行')
+    assert.equal(logger.logQueue.length, 1, '总共只有主行一行')
+  })
 })
 
 // 跨进程可观测（2026-10-14 四维审查必改 4）：跨进程并发写同一目录目前挡不住，但不能再「静默」。

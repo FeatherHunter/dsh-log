@@ -8,7 +8,7 @@ export interface LogExport {
     /** 原始行（原样，按写入顺序：先旧文件后新文件）。 */
     rows: string[];
 }
-/** 把一个日志目录收成「摘要 + 原始行」；读不到的文件按 0 行记，绝不抛错。 */
+/** 把一个日志目录收成「摘要 + 原始行」；读不到的文件如实标 `unreadable`，绝不抛错、也不冒充空文件。 */
 export declare function collectExport(entry: LogDir): Promise<LogExport>;
 /**
  * 交日志：默认输出「摘要 + 原始行」（贴工单、当附件都够）；

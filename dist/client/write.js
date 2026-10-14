@@ -85,6 +85,11 @@ export function createWriteStage(input) {
         const shadow = relocated.shadow;
         if (shadow) {
             out[SHADOW_FIELD] = shadow;
+        }
+        // 计数与影子行**只针对「调用方真的传了保留字」**（reservedMoved）：只带 `_shadow`
+        // 是调用方自己归档自己的字段，不是我们搬的——那时候影子行里那句「被让位的是这些键」
+        // 也是假的，所以整块一起跳过（`fields._shadow` 仍原样保留）。
+        if (shadow && relocated.reservedMoved) {
             traceState.shadowWarns += 1;
             // warn 计数之外再记一行可检索的 warn 行（error 本体照落，不拒收；本行不含保留字，不递归）。
             // 影子行不占主行配额：只在富余一格以上时附记，满时舍影子保主行（影子行不挤掉主行）；

@@ -191,4 +191,28 @@ describe('宿主侧链上下文 store.trace()（0.4.0）', () => {
       await rm(cacheDir, { recursive: true, force: true })
     }
   })
+
+  it('影子计数只数「调用方真的传了保留字」：只带 _shadow 不算冲突、也不写影子行', async () => {
+    const { cacheDir, host, store } = await makeHost('ht-shadow')
+    try {
+      const t = store.trace({ traceId: 'T-SHADOW' })
+      // 只带 _shadow（调用方自己归档自己的字段）：不是我们搬的 → 不计数、不写 log.trace.shadow
+      t.log('warn', 'shadow.self', { _shadow: { mine: 1 } })
+      assert.equal(t.shadowWarns, 0, '只带 _shadow 不算保留字冲突')
+      // 真的传了保留字：计数 +1，值进 _shadow，主行用上下文的
+      t.log('warn', 'shadow.conflict', { traceId: 'caller-id', note: 'x' })
+      assert.equal(t.shadowWarns, 1, '传了保留字才算冲突')
+      await store.synced()
+      const { rows } = await rowsOf(cacheDir)
+      const self = rows.find((r) => r.event === 'shadow.self')
+      const conflict = rows.find((r) => r.event === 'shadow.conflict')
+      assert.deepEqual(self.fields._shadow, { mine: 1 }, '调用方自己的 _shadow 原样保留')
+      assert.equal(conflict.fields.traceId, 'T-SHADOW', '主行用上下文的 traceId')
+      assert.equal(conflict.fields._shadow.traceId, 'caller-id', '调用方传的进 _shadow')
+      assert.equal(rows.filter((r) => r.event === 'log.trace.shadow').length, 0, '宿主侧不写影子行（行本身就是证据）')
+    } finally {
+      host.store.release()
+      await rm(cacheDir, { recursive: true, force: true })
+    }
+  })
 })
