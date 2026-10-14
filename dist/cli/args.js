@@ -7,7 +7,9 @@ import { LOG_LEVEL_ORDER, isKnownLevel } from '../core/level.js';
 export const USAGE = `dsh-log —— 看日志（只读）
 
 用法：
-  dsh-log tail <目录...> [选项]
+  dsh-log [tail] <目录...> [选项]
+
+  tail 是子命令；为了少打字可以省略（dsh-log <目录...> 与 dsh-log tail <目录...> 等价）。
 
 目录可以是「某个插件的日志目录」（里面是 YYYY-MM-DD.log），
 也可以是「日志根目录」（里面是 logs-<pluginId>/），两种都认。
@@ -62,6 +64,8 @@ export function parseArgs(argv, nowMs = Date.now()) {
         help: false,
         version: false
     };
+    // 子命令只认一次（见下方 `tail` 分支）。
+    let subcommandSeen = false;
     const takeValue = (arg, key, index) => {
         const eq = arg.indexOf('=');
         if (eq >= 0)
@@ -137,6 +141,13 @@ export function parseArgs(argv, nowMs = Date.now()) {
         }
         if (arg.startsWith('-'))
             return { options, error: `不认识的选项 ${arg}` };
+        // 子命令 `tail`：帮助里就是这么写的，所以必须真认它——否则 `tail` 会被当成一个目录名，
+        // 于是每次带子命令调用都白吐一行「没找到日志目录：tail」（2026-10-15 用户实测报的缺陷）。
+        // 只认**第一个**位置参数上的那一个：`dsh-log tail tail` 里的第二个仍是目录名（可以叫 tail 的目录）。
+        if (arg === 'tail' && !subcommandSeen && options.paths.length === 0) {
+            subcommandSeen = true;
+            continue;
+        }
         options.paths.push(arg);
     }
     return { options, error: '' };

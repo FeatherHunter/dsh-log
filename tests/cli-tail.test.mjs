@@ -80,6 +80,25 @@ describe('读侧命令行（C）：dsh-log tail', () => {
     assert.match(lines[2], /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3} ERROR new\.event /)
   })
 
+  test('子命令 tail 真被认（可写也可省）：两种写法输出一样、stderr 干净', () => {
+    const withSub = run(['tail', logDir])
+    const withoutSub = run([logDir])
+    assert.equal(withSub.status, 0, withSub.stderr)
+    assert.equal(withSub.stderr, '', `带子命令不该有任何 stderr（缺陷：tail 被当成目录名），实际：${withSub.stderr}`)
+    assert.equal(withSub.stdout, withoutSub.stdout, '`dsh-log tail <目录>` 与 `dsh-log <目录>` 必须完全等价')
+    assert.ok(!withSub.stderr.includes('没找到日志目录：tail'))
+
+    // 子命令后面的选项也要认：`tail -n 1 <目录>`
+    const subThenFlag = run(['tail', '-n', '1', logDir])
+    assert.equal(subThenFlag.status, 0, subThenFlag.stderr)
+    assert.equal(subThenFlag.stderr, '')
+    assert.equal(subThenFlag.stdout.trimEnd().split('\n').length, 1)
+
+    // 只有一个 `tail` 时它是子命令、不是目录名：退回当前目录（这里没有日志，报的是「一个都没有」）
+    const bareSub = run(['tail'])
+    assert.ok(!bareSub.stderr.includes('没找到日志目录：tail'), `tail 不该被当成目录名，实际：${bareSub.stderr}`)
+  })
+
   test('--json：原样输出（管道给 jq 用），仍是「跳过坏行、跳过半行」', () => {
     const res = run(['tail', logDir, '--json'])
     assert.equal(res.status, 0, res.stderr)

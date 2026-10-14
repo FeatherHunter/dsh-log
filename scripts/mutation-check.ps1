@@ -357,6 +357,13 @@ export interface LogTimer {" }
      tests = 'format-row'; pattern = '渲染：默认不上色'
      from = "    const padCount = Math.max(0, eventWidth - event.length);"
      to   = "    const padCount = Math.max(0, eventWidth - (colored.length + event.length));" }
+  # M86 子命令 tail 被当成目录名（2026-10-15 用户实测的 0.3.1 缺陷）：
+  # 帮助写着 dsh-log tail <目录...>，实现却不认这个子命令 → 每次带子命令调用都白吐一行
+  # 「没找到日志目录：tail」（退出码仍是 0、日志照常输出，所以只有肉眼看得见）。
+  @{ name = 'M86 不认 tail 子命令（当成目录名）'; file = 'cli/args.js'
+     tests = 'cli-tail'; pattern = '子命令 tail 真被认'
+     from = "        if (arg === 'tail' && !subcommandSeen && options.paths.length === 0) {"
+     to   = "        if (false) {" }
 
   # M57 封存照单全收：rename 调完就当搬走了，不回查目录（2026-10-14 soak 实测的旧行为：
   # 假适配器下整篇被覆写、20k 行静默丢 12500 行、dropped 仍是 0）。

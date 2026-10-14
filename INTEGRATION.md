@@ -227,7 +227,7 @@ npx dsh-log tail ./cache --trace <traceId>         # 追一条链（按 traceId�
 npx dsh-log tail ./cache --json | jq .             # 回到机器态，交给 jq
 ```
 
-目录给插件的日志目录（`logs-my-plugin`）或它的父目录（`cache`，里面是 `logs-*/`）都认。半行（有人正在写）与解析不了的行一律跳过；封存件按写入先后排在可写文件之前。
+目录给插件的日志目录（`logs-my-plugin`）或它的父目录（`cache`，里面是 `logs-*/`）都认。半行（有人正在写）与解析不了的行一律跳过；封存件按写入先后排在可写文件之前。子命令 `tail` 可写也可省——`npx dsh-log <目录...>` 与 `npx dsh-log tail <目录...>` 完全等价（只有第一个位置参数上的 `tail` 是子命令；目录名恰好叫 `tail` 时写 `./tail`）。
 
 程序里想自己渲染（纯函数，浏览器也能用）：
 
