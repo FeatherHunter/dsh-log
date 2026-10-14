@@ -2,17 +2,39 @@
 
 这份文件记的是「发出去的是什么」：每发一版，把原始输出与关键数字留在下面，供下一个人复现和核对。文中的字节数、文件数都描述**当时发出去的那一份**，不是当前工作区。0.2.0 是首次公开发布，随 Node 程序入口一起上线；此前只有本地演练（见第四节）。
 
-## 〇.0 dsh-log 0.3.2（仓库里已修，待发布）
+## 〇.0 dsh-log 0.3.2（已发布，2026-10-15 01:37 +08:00）
 
-**状态**：**尚未发布**（截至本文写作，官方源 `latest` 仍是 0.3.1）。仓库里 `package.json` 已升到 0.3.2，等发布指令。
+**状态**：已发布到官方源，`dist-tags.latest` = **0.3.2**。发布者 `feather_wch`（自动化 token，只写进 `%TEMP%` 的临时 npmrc、`npm publish --userconfig <该文件>`，发完即删——仓库里没有 `.npmrc`）。
 
 **改了什么**（一处缺陷修复）：
 
 **`dsh-log tail` 的子命令现在真被认**。帮助里一直写着 `dsh-log tail <目录...>`，0.3.1 的实现却把 `tail` 当成一个目录名——于是每次带子命令调用都会在 stderr 白吐一行 `dsh-log: 没找到日志目录：tail`（退出码仍是 0、日志照常输出，所以只有肉眼看得见）。这是 **2026-10-15 由使用方实测报告**的缺陷（报告条目 7）。修法：`src/cli/args.ts` 的解析器把**第一个位置参数上的 `tail`** 当子命令吃掉；`dsh-log tail <目录...>` 与 `dsh-log <目录...>` 完全等价。目录名恰好叫 `tail` 时写 `./tail`；`dsh-log tail tail` 里的第二个 `tail` 仍是目录名。
 
-**证据**：`tests/cli-tail.test.mjs` 新增一例（两种写法输出逐字节相同、`stderr === ''`、`tail` 不再出现在「没找到日志目录」里）；变异 **M86**（把子命令分支改成 `if (false)`）→ 该用例变红；`npm test` **198/198（21 套）**；变异表 **83/83 RED**；`node scripts/pack-smoke.mjs` 通过。真机复跑：`node dist/cli.js tail <目录>` 与 `node dist/cli.js <目录>` 输出一致、stderr 为空。
+**发布前证据**：`tests/cli-tail.test.mjs` 新增一例（两种写法输出逐字节相同、`stderr === ''`、`tail` 不再出现在「没找到日志目录」里）；变异 **M86**（把子命令分支改成 `if (false)`）→ 该用例变红；`npm test` **198/198（21 套）**；变异表 **83/83 RED**；`node scripts/pack-smoke.mjs` 通过；真机复跑 `node dist/cli.js tail <目录>` 与不带子命令输出一致、stderr 为空。
 
-**发布前复核**：按第三节流程跑一遍（体检、升版本、干跑、发布、发布后验证六段），把原始输出补到本节。
+**发布输出**（原样）：
+
+```
+npm notice version: 0.3.2
+npm notice filename: dsh-log-0.3.2.tgz
+npm notice package size: 156.8 kB
+npm notice unpacked size: 466.6 kB
+npm notice shasum: cead74b33d6beb0de9d542eb372b3b6c72514c94
+npm notice integrity: sha512-718E1Otxv3GV1CPZk4FUToyULgODuXo9oZmca1ZTChWJp0w0esRoPeaxVQeyBtmTP2t0GUM8Hlax/CJBG14oYg==
+npm notice total files: 103
++ dsh-log@0.3.2
+```
+
+**源上元数据**：`latest` = 0.3.2；`gitHead` = `6c8a0a5d76f6dbc0f5993227bd829c71bbd1b543`（= 仓库 HEAD）；`dist.fileCount` = 103；`dist.unpackedSize` = 466567；`dist.shasum` = `cead74b33d6beb0de9d542eb372b3b6c72514c94`；发布时间 `2026-10-14T17:37:04Z`。（注意：发布后头 1–2 分钟 packument 的 `dist-tags` 可能还是旧值，但按版本端点 `registry.npmjs.org/dsh-log/0.3.2` 查已经就位。）
+
+**发布后四项核对（全过）**：
+
+1. 源上版本与 `gitHead` 与本地 HEAD 一致（上一行）。
+2. 包内文档与仓库**逐字一致**（SHA256）：`README.md` `35D052CF50C93F60…`、`INTEGRATION.md` `CE9E457576AF9EAA…`、`LICENSE` `326012A43D1F139C…`、`event-list.template.json` `A024DCBB8AA8408E…`。
+3. 空工程装一次（干净 `--cache`）：装到 0.3.2、49 个 `.d.ts`；`createQuickLog` 写两行、`await quick.ready` 回 `{"ok":true,"pending":0,"lastPersistFail":null}`；**包内 CLI** `node dist/cli.js tail ./cache` 与 `node dist/cli.js ./cache` 输出一致、**stderr 为空**（本版修的就是这条）。
+4. 类型面：消费方 `strict` + `types: []`（不装 `@types/node`）+ `skipLibCheck: false` 编译根入口与 `dsh-log/node` → tsc exit 0。
+
+**回滚口径**：若发现严重问题，用 `npm deprecate dsh-log@0.3.2 "原因"` 标废弃，不做 `unpublish`。
 
 ## 〇.1 dsh-log 0.3.1（已发布，2026-10-14 19:41 +08:00）
 

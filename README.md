@@ -633,7 +633,7 @@ CI 已把上面这些固化成**两条作业**（`.github/workflows/ci.yml`）�
 
 门禁规矩（逐条与 `tests/arch.test.mjs` 的断言一致）：`core/` 只引 core 内部；`platform/` 只引 `node:` 内置、core 与 platform 内部；配置面只引 core 与配置面内部**且内部无环**；面与引擎不许引入口层；`node:` 内置的**白名单只有四个文件**——`platform/fs-node.ts`、`platform/timer-node.ts`、`platform/read-node.ts`、`node.ts`（入口层的 `index.ts`、`host.ts`、`cli.ts` 与组合根都不许碰 `node:`，IO 一律走 platform 端口——读侧工具因此**从结构上就不具备写文件的能力**）；`engine/`、`client/`、`host/` 三个面**互不认识**、也不反向引用组合根（跨面组合只发生在组合根与入口——否则同一份语义会在两个面里各长一份）；全包零运行时依赖、不许 `require`。另一条守卫是 `tests/public-surface.test.mjs`——四个入口的导出名集合快照，搬代码时护着公开面不漂移（要改公开面就得同时改名单与文档）。
 
-官方源最新是 **0.3.1**（2026-10-14 发布；此前公开发布过 0.3.0 与 0.2.x）。各版本的原始输出、四项发布后核对与已知边界都记在包根的 `notes-publish-drill.md`（不随包发布）。再发新版本时，除了上面两步，还要按第 10 节的版本策略定版本号、把实际发布输出记进那份记录，或用包目录下的发布向导脚本 `publish-wizard.sh` 走一遍完整流程（体检、登录、升版本、干跑、发布、发布后验证六段）。发布后有一件事向导不代做、但必须自己做：核对包内 `README.md` 与 `INTEGRATION.md` 跟仓库一致——发出去的是发布那一刻的文档，仓库里改的不会自动跟上。本仓当前没有 `.npmrc`，也**不要**往仓库里放 token：要么用只含自动化 token 的临时 npmrc（`npm publish --userconfig <临时文件>`），要么临时设 `NODE_AUTH_TOKEN`。另：本机 npm 的 packument 缓存可能滞后（`npm view`/`npm i` 仍看到旧版本）——核对源上状态请直连 registry HTTP 或换一个 `--cache` 目录。
+官方源最新是 **0.3.2**（2026-10-15 发布；此前公开发布过 0.3.1、0.3.0 与 0.2.x）。各版本的原始输出、四项发布后核对与已知边界都记在包根的 `notes-publish-drill.md`（不随包发布）。再发新版本时，除了上面两步，还要按第 10 节的版本策略定版本号、把实际发布输出记进那份记录，或用包目录下的发布向导脚本 `publish-wizard.sh` 走一遍完整流程（体检、登录、升版本、干跑、发布、发布后验证六段）。发布后有一件事向导不代做、但必须自己做：核对包内 `README.md` 与 `INTEGRATION.md` 跟仓库一致——发出去的是发布那一刻的文档，仓库里改的不会自动跟上。本仓当前没有 `.npmrc`，也**不要**往仓库里放 token：要么用只含自动化 token 的临时 npmrc（`npm publish --userconfig <临时文件>`），要么临时设 `NODE_AUTH_TOKEN`。另：本机 npm 的 packument 缓存可能滞后（`npm view`/`npm i` 仍看到旧版本）——核对源上状态请直连 registry HTTP 或换一个 `--cache` 目录。
 
 ## 10. 版本策略
 
@@ -649,11 +649,11 @@ CI 已把上面这些固化成**两条作业**（`.github/workflows/ci.yml`）�
 
 升级方式：`npm i dsh-log@0.3.1`，现有代码不需要改；写日志时想给人看，就按第 3.2 节在 `fields.message` 里放一句人话。
 
-**0.3.2（仓库里已修，截至本文写作尚未发布）**：
+**0.3.2（2026-10-15 发布）**：
 
 1. **`dsh-log tail` 的子命令现在真被认**。帮助里一直写着 `dsh-log tail <目录...>`，0.3.1 的实现却把 `tail` 当成一个目录名——于是每次带子命令调用都会在 stderr 白吐一行 `dsh-log: 没找到日志目录：tail`（退出码仍是 0、日志照常输出，所以只有肉眼看得见）。修后 `dsh-log tail <目录...>` 与 `dsh-log <目录...>` **完全等价**、stderr 干净；只有第一个位置参数上的 `tail` 会被当成子命令（目录名恰好叫 `tail` 时写 `./tail`）。
 
-升级方式：`npm i dsh-log@0.3.2`（发布后；本行在发布时会同步更新）。
+升级方式：`npm i dsh-log@0.3.2`，现有代码不需要改。
 
 ## 11. 安全声明与许可证
 
