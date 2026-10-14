@@ -30,24 +30,25 @@ await log.ready   // 读一次刷一次：把此刻为止的行刷到底，再�
 > - **冲突会自愈**：闸门只在「判定那一刻的持有者还在」时有效；对方写完交还或 `release()` 之后，本实例的下一行照常落盘，不必等自己 `release()`。
 > - `release()` 同步幂等；释放那一刻若还有一批正在写盘，交还会延后到这批写完（同步路径下写盘在途时第二个实例仍当场抛）。
 > - 同一 `cacheDir` 下不同 `pluginId` 各写自己的目录与开关文件，可以并存。
-> - **跨进程没有登记（风险提示，不是保证）**：登记表是模块副本级的，另一个进程看不见。实测两个真进程同目录各写各的都能成功、两边的行都在；危险窗口是**并发读改写**——两个进程同时刷盘时，后写者按自己读到的旧内容整份覆写，可能吃掉对方刚写的行。不要这样用。
+> - **跨进程没有登记（风险提示，不是保证）**：登记表是模块副本级的，另一个进程看不见，包不做跨进程协调。实际后果取决于你的文件服务**有没有 `appendText`**（依赖表见步骤 2）：**有追加能力**（`dsh-log/node` 的入口自带；自己实现文件服务时包一层 `fs.appendFile` 即可）时两个进程只会交错、不会互相覆写——实测两进程同目录各写 8 行 16 行一行不少、大行（各 20 行 × 64 KB）40 行一行不少且 0 条半行；**没有追加能力**（只有读改写）时后写者按自己读到的旧内容整份覆写，会吃掉对方刚写的行（实测两进程各写 5 行、间隔 30 毫秒，10 行只剩 9 行）。两种形态都会在事后留一条 `log.persist.fail(reason: 'foreign-write')` 诊断行（只报告「有人动过」，不猜被吃了几行）。正确做法仍然是一个日志目录只给一个写者。
 
 DSH 插件宿主侧（3 行，走步骤 2 的同一条路）：
 
 ```js
 import { createHostLog, registerHostLogPhones } from 'dsh-log/host'
+const registry = new Map()                                      // 这张表要留着：宿主调用通道按名字取它（步骤 3 会用到）
 const hostLog = createHostLog(deps, { pluginId: 'wf', prefix: 'wf' })
-registerHostLogPhones(new Map(), hostLog)
+registerHostLogPhones(registry, hostLog)                        // 注册 5 个写侧动作 + 1 个只读查询电话
 ```
 
-两条规矩（0.3.0）：保落盘认 `store.synced()`（已落地）——刷完当期队列、等到在途写盘真的收尾才 resolve，杀进程前调此即不丢；`store.flush()` 只管安排刷盘，调了不等于写完；查日志先判无权（查询电话名 = 前缀加 `.logQuery`，六参：`timeRange`、`pluginId`、`level`、`keyword`、`traceId`、`page`；宿主入口注册 5 个写侧动作加这个只读查询，共 6 个）：
+两条规矩（0.3.0）：保落盘认 `hostLog.store.synced()`（已落地）——刷完当期队列、等到在途写盘真的收尾才 resolve，杀进程前调此即不丢；`hostLog.store.flush()` 只管安排刷盘，调了不等于写完；查日志先判无权（查询电话名 = 前缀加 `.logQuery`，六参：`timeRange`、`pluginId`、`level`、`keyword`、`traceId`、`page`；宿主入口注册 5 个写侧动作加这个只读查询，共 6 个）：
 
 ```js
-const res = await phones.handleLogQuery({ pluginId: 'wf' })
+const res = await hostLog.store.handleLogQuery({ pluginId: 'wf' })
 if (res.denied) return '无权：只查自己插件的日志'
 ```
 
-宿主侧 `await store.synced()` 等落盘；Node 短命程序注册退出钩 `store.beforeExit()`（重复调用只注册一次）。选路规则不变：先按自己的形态选一条路走，**不要两条都走**。
+宿主侧 `await hostLog.store.synced()` 等落盘；Node 短命程序注册退出钩 `hostLog.store.beforeExit()`（重复调用只注册一次）。选路规则不变：先按自己的形态选一条路走，**不要两条都走**。
 
 ## 步骤 0. 确认环境
 

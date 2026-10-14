@@ -2,7 +2,27 @@
 
 把本仓日志系统装成的 npm 包：DSH 插件与独立跑的 Node 程序都能照着它集成使用。本包由三块合成——宿主落盘引擎（#559）、客户端转发引擎（#560）、事件清单格式与通用检查器（#561），是地图 #556 的产物。
 
-全程用词：日志系统指日志功能本身（引擎、对外接口、检查器、文档）；日志包指装着日志系统的这个 npm 包。电话指宿主对外提供的方法；落盘指宿主统一写本地文件的动作。
+全程用词：日志系统指日志功能本身（引擎、对外接口、检查器、文档）；日志包指装着日志系统的这个 npm 包。电话指宿主对外提供的方法；落盘指宿主统一写本地文件的动作。其余高频词一次讲清：
+
+| 词 | 含义 |
+|---|---|
+| 实例 | 一次建库（宿主的 `createHostLog`、Node 的 `createNodeHostLog`/`createQuickLog`、客户端的 `createClientLog`）得到的对象；队列、丢弃数、开关状态各自独立 |
+| 丢弃数 `dropped` | `getDroppedCount()` 的累计值，**只数用户行**；内部诊断行不计 |
+| 诊断行 | 引擎自己写的 `log.persist.fail`（warn 级）、`log.rotate.*`、`log.retain.*`（info 级）；不进告警面、不计 `dropped` |
+| 常驻（resident） | 开关关着也落盘的事件 = 包内固定 43 个 DSH 事件名 ∪ 清单里 `kind: 'resident'` 的名字 |
+| 封存 | 当日文件超过 `maxSize` 时原子改名成 `YYYY-MM-DD.N.log` 并另开新文件；改不了名就降级并留 `log.rotate.degraded` |
+| 闸门 / 目录冲突 | 同一**日志目录**同一时刻只许一个活跃写者；冲突时那批行不写共享文件、计入丢弃数，之后 `log()` 抛中文错，对方交还后自愈 |
+| quick | `dsh-log/node` 的 `createQuickLog`：文件服务与计时器由包提供，3 行可用 |
+| `ready` / `synced()` | 「读一次刷一次」的回执 / 「刷完当期队列才 resolve」；两者都只保**调用那一刻之前**入队的行 |
+| `traceChain` | 按 `traceId` 整链取行的独立通道，不受 `limit ≤ 100` 截断 |
+| `v` | 行格式版本，0.3.0 恒为 `3`；`v != 3` 的旧行查询跳过并计入 `skipped` |
+
+## 目录
+
+- **上手**：先跑起来（30 秒）· 0. 我该读哪儿 · 0.1 常见任务配方 · 0.2 故障排查
+- **接口**：1. 安装 · 2. 入口 · 2.1 独立 Node 程序 · 2.2 公开面速查 · 3. 三步接入（宿主）· 4. 配置默认值 · 5. 电话名与客户端 · 5.3 追踪链路
+- **语义**：6. 失败语义 · 6.1 轮转与保留 · 7. 事件清单与检查器 · 8. 已知事项
+- **维护**：9. build 与门禁 · 9.1 源码分层 · 10. 版本策略 · 11. 安全与许可 · 12. 0.3.0 迁移 7 步
 
 ## 先跑起来（quick 默认入口，30 秒）
 
@@ -50,7 +70,7 @@ registerHostLogPhones(registry, hostLog)                     // 注册 5 个写�
 两条规矩（0.3.0）：保落盘认 `store.synced()`（已落地）——刷完当期队列、等到在途写盘真的收尾才 resolve，杀进程前调此即不丢；`store.flush()` 只管安排刷盘，调了不等于写完；查日志先判无权（查询电话名 = 前缀加 `.logQuery`，六参：`timeRange`、`pluginId`、`level`、`keyword`、`traceId`、`page`；宿主入口注册 5 个写侧动作加这个只读查询，共 6 个）：
 
 ```js
-const res = await phones.handleLogQuery({ pluginId: 'wf' })
+const res = await hostLog.store.handleLogQuery({ pluginId: 'wf' })
 if (res.denied) return '无权：只查自己插件的日志'
 ```
 
@@ -72,6 +92,129 @@ if (res.denied) return '无权：只查自己插件的日志'
 | 写独立 Node 程序（不是插件），要往本地写日志 | 包内 `INTEGRATION.md` 路线 B：步骤 0、1、2B，再看步骤 4 的落点说明 |
 | 已经装好，要查接口形状（电话、配置、回参） | 本文第 4 到 7 节 |
 | 改了本包要发版 | 本文第 9 节；发布记录与向导在包根的 `notes-publish-drill.md`（不随包发布） |
+
+## 0.1 常见任务配方（照抄即可）
+
+每条都只用公开入口，并且在本仓发布前用真 tarball 实跑过一遍（开发期探针，不随包发布）；片段里出现的 `log` 是配方 ① 里那个实例，`hostLog` 是本文「宿主侧接线」那段建出来的实例。
+
+**① 让我这次排查的详细日志落到文件**——开关是持久的，命令行工具下次运行仍生效：
+
+```js
+const log = await createNodeHostLog({ cacheDir }, { pluginId: 'my-cli', prefix: 'my-cli' })
+await log.store.handleLogSetSwitch({ enabled: true })   // 写 <cacheDir>/log-switch-my-cli.json
+log.store.log('info', 'my.detail', { step: 1 })          // 回执 'queued'；开关关着时回 'skipped'（是拦下，不是丢）
+const st = await log.store.handleLogGetSwitch({})        // { ok: true, enabled: true }
+await log.store.handleLogSetSwitch({ enabled: false })   // 排查完记得关
+```
+
+**② 让某类 `info` 不靠开关也落盘**（常驻事件）——清单里标 `kind: 'resident'`：
+
+```js
+const eventList = { version: 1, pluginId: 'my-cli', events: {
+  'my.started': { level: 'info', kind: 'resident', fields: ['argv'] },   // 开关关着也落
+  'my.detail':  { level: 'info', kind: 'ondemand', fields: ['step'] }    // 只在开关打开时落
+} }
+const log = await createNodeHostLog({ cacheDir }, { pluginId: 'my-cli', prefix: 'my-cli', eventList })
+```
+
+**③ 命令行工具退出前保证落盘**（`process.exit` 会带走队列里没写下去的行，`error` 也保不住）：
+
+```js
+const report = await log.ready          // 读一次刷一次
+if (!report.ok) console.error('没落全', report.pending, report.lastPersistFail)
+// 或者：进程自然退出前注册一次退出钩（重复调用只注册一次）
+log.store.beforeExit()
+```
+
+**④ 追一条链路**（`child` 显式继承，不用 `async_hooks`）：
+
+```js
+const child = clientLog.child({ requestId: 'r-1' })   // 继承 traceId、刷新 spanId、seq 从 0 起
+child.log('info', 'step.one', {})
+clientLog.why()                                        // 三件套来源：新建/继承/透传 + shadowWarns
+const chain = await hostLog.store.handleLogQuery({ traceId: clientLog.why().traceId })
+chain.traceChain                                       // true：整链按 (seq, ts) 排，不受 limit 截断
+```
+
+**⑤ 多插件并存：查自己 / 查别家**——查询只回自己的桶，跨桶要宿主显式授权：
+
+```js
+// 1) 查自己：实例的 store 直接查（同一个 store 也能查别人，但只会回 denied）
+const mine = await hostLog.store.handleLogQuery({ pluginId: 'my-plugin' })      // denied: false、entries 是本插件的行
+const others = await hostLog.store.handleLogQuery({ pluginId: 'other-plugin' }) // denied: true、entries 空、一行不读
+
+// 2) 需要跨插件时由宿主自己聚合：第二参是「来源」数组（每项 { pluginId, query }），
+//    第三参是显式授权名单——没在名单里的来源进 denied，零行。
+const sources = [
+  { pluginId: 'my-plugin', query: (args) => hostLog.store.handleLogQuery(args) },
+  { pluginId: 'other-plugin', query: (args) => otherStore.handleLogQuery(args) }
+]
+const agg = aggregateLogQuery('my-plugin', sources, ['other-plugin'], { pluginId: 'other-plugin' })
+// agg.denied 里列出的就是被拒的来源；agg.entries 只含被授权来源的行
+```
+
+**⑥ 把某天的日志导出成文件**（回包 8 键，`text` 是原文）：
+
+```js
+const res = await hostLog.store.handleLogExport({ date: '2026-10-14' })   // `hostLog.store` 就是本文里的 `log.store`
+await writeFile('today.log', res.text)   // res.bytes 是**字符串长度**，不是真实字节数
+```
+
+**⑦ 清历史但绝不碰今天**：
+
+```js
+await hostLog.store.handleLogClear({ date: '2026-10-01' })   // 只删那天
+await hostLog.store.handleLogClear({ date: today })          // removed: 0，不碰文件
+await hostLog.store.handleLogClear({ date: 'all' })          // 删所有匹配的 .log；今天可写文件、开关文件、audit.json 永不删
+```
+
+**⑧ 调轮转与保留**（默认一天一个文件、超 5MB 封存、留 14 天）：
+
+```js
+createNodeHostLog({ cacheDir }, { pluginId: 'my-cli', prefix: 'my-cli', maxSize: 1024 * 1024, maxDays: 7 })
+// 也可以建好之后问状态：maxSize 是字节阈值、maxDays 是按天保留（含当天），配置非法值建库即抛
+```
+
+**⑨ 消费日志行**（落盘恒五键，自监控行按事件名前缀 `log.` 过滤）：
+
+```js
+for (const line of text.split('\n').filter(Boolean)) {
+  const row = JSON.parse(line)
+  if (row.v !== 3 || row.event.startsWith('log.')) continue   // 旧格式行 / 引擎自己的诊断行
+  console.log(row.ts, row.level, row.event, row.fields)
+}
+```
+
+**⑩ 客户端接不通宿主时**（不抛错，给机器码 + 有界重试）：
+
+```js
+clientLog.setLogSwitch(true)         // 失败原因只给机器码：host-unavailable / host-rejected / switch-timeout / stale
+clientLog.getDroppedCount()          // 传输失败先入重试位（3 次退避），到顶才按「被拒条数」如实计数
+await clientLog.reconcileLogSwitch() // 启动对账，开关以宿主为准
+```
+
+**⑪ 高频写入怎么选参数**：写盘是异步的（约 1000 毫秒防抖，`error`/`warn` 走直通不等防抖）；宿主队列默认 1000 行，满了按级别丢（普通行丢新并响一次 `onDrop`，`error`/`warn` 挤最旧普通行、挤不下就越过配额硬塞）；单文件超过 `maxSize` 封存，所以「一天的量」决定单次覆写体积。写量想从 O(全文) 降到 O(新增)，给文件服务加 `appendText`（`dsh-log/node` 自带）。要确认某一刻之前的行都在文件里，就 `await store.synced()`。
+
+```js
+log.store.setOnDrop((count, reason) => console.warn('[dsh-log] 丢弃', count, reason))  // reason: 'queue-full' | 'write-fail'
+```
+
+## 0.2 故障排查（现象 → 判据 → 处理）
+
+| 现象 | 先看什么 | 处理 |
+|---|---|---|
+| 文件里没有我写的行 | `log()` 的回执：`'skipped'` 是开关拦下（不是丢）、`'queued'` 才进队列 | 打开开关（配方 ①），或把事件标成 `resident`（配方 ②） |
+| `getDroppedCount()` 在涨 | `setOnDrop((count, reason) => …)` 收到的 reason 与 `getLastPersistFail()` | 调大 `maxQueue`；写失败看 `reason`（`write-fail` 恢复后会补落盘） |
+| 队列压着不落 | `getPendingCount()`、`getLastPersistFail()`（`op`/`reason`/`dirHash`，不含真实路径） | 磁盘满/只读 → `no-dir`/`write-fail`；磁盘恢复后 `await synced()` 即补落盘 |
+| `ready.ok` 为假 | `pending` 与 `lastPersistFail` | 同上；`ok` 为真只代表那一刻之前入队的行都落定了 |
+| 刚写的行查不到 | 查询默认只看**近 24 小时**；且只看得见**已落盘**的行 | 先 `await synced()`；要查更早的窗口就传 `timeRange` |
+| 查不到历史行 | `skipped` 计数（`v != 3` 的旧行）与封存/清理 | `v != 3` 的行查询跳过但仍在文件里、导出可见；封存件照常参与查询 |
+| 查询回 `expired: true` | 当天的文件集合变了（封存、清理、跨天） | 清掉本次已累积结果，从第一页重新翻（宁可重读，不漏读） |
+| 查别家日志回 `denied` | 跨桶读被拒是设计 | 由宿主用 `aggregateLogQuery` 显式授权（配方 ⑤）；被拒不等于源行被删 |
+| 建库抛「已有活跃写者」 | 同一日志目录已有活跃实例 | 前一个实例 `release()`，或换目录；宿主入口是写盘那一刻判、会自愈；跨进程不设防（见本文开头「先跑起来」末条） |
+| 开关开了 `info` 还是不落 | 宿主入口的磁盘开关在**第一次 `logGetSwitch` 电话**时才读；`dsh-log/node` 建库即读 | 按 `INTEGRATION.md` 路线 A/B 的对照表确认读取时机 |
+| 文件超了 `maxSize` 没封存 | 适配器缺 `rename`/`listDir`：看 `log.rotate.degraded` 的 `reason` | 给文件服务补能力（或接受降级：继续追加、一行不丢） |
+| 两个进程写同一目录 | 有没有 `appendText`：有则只交错不覆写，没有则可能吃掉对方刚写的行 | 一个日志目录只给一个写者；两种形态都会留 `foreign-write` 诊断（见本文开头「先跑起来」末条） |
 
 ## 1. 安装
 
@@ -119,6 +262,15 @@ const report = await log.ready   // 读一次刷一次；report.ok 为真才代�
 1. **`await log.ready` 不能省**。落盘是先入内存队列、再由约 1000 毫秒的防抖窗口异步写下去的：程序顺着事件循环自然跑完，Node 会等这个定时器，日志自己会落；但结尾调了 `process.exit()`、抛错退出或被强杀的程序，队列里还没写下去的那批就随进程消失（**`error` 与 `warn`、`info` 一样会丢**——「直通」只是不等那 1000 毫秒防抖，写盘仍是异步的；实测 `log('error', …)` 紧跟 `process.exit(0)` 是 0 行落盘。只有 `await log.ready` / `await log.store.synced()` 才能保）。命令行工具通常在结尾显式退出，所以这条按必须处理。`log.ready` 是**读一次刷一次**的只读属性：取它的那一刻，把此刻为止入队的行刷到底，再回执 `{ ok, pending, lastPersistFail }`——`ok` 为真表示队列与重试位都空了、前面每一行都在文件里；写盘失败时 `ok` 为假、`pending` 是还压着的行数、`lastPersistFail` 是最近一次失败的定位元（`op`/`reason`/`dirHash`，不含真实路径）。磁盘恢复后再读一次就会补落盘。同一件事也可以改用 `await log.store.synced()`（刷完当期队列才 resolve，口径见第 12 节步骤 4），或先 `log.store.beforeExit()` 注册退出钩（重复调用只注册一次）。入口**不往用户文件里写任何内部路标行**（0.3.0 修正：从前那行 debug 级 `log.flush.marker` 在开关关着时根本不落盘，等于没判据）。
 2. **开关每次新建时会被读回来**。独立程序每次调用都是新进程，所以入口建库时会把上次留下的开关读回来，打开的详细日志在下次调用仍然生效；写入用 `log.store.handleLogSetSwitch({ enabled: true })`。
 3. **级别规则与插件侧完全一致**：错误与告警恒落盘；`info` 只在开关打开时落盘，**除非这个事件名在常驻集合里**——常驻集合 = 包内固定 43 个 DSH 事件名 ∪ 调用方清单（`eventList`）里标了 `kind: 'resident'` 的事件名；`debug` 同样只在开关打开时落盘。
+
+## 2.2 公开面速查（四个入口的导出名）
+
+这份名单由 `tests/public-surface.test.mjs` **逐字钉住**（数量：根 32 / 宿主 23 / 客户端 17 / Node 4）；要改公开面就得同时改那份测试与本节。跨入口同名的必须是同一个引用（同源转出口，不许各自实现）。
+
+- **根 `dsh-log`（32）**：常量 `LOG_FORMAT_VERSION`、`EVENT_LEVELS`、`EVENT_KINDS`、`LOG_DEBOUNCE_MS`、`DEFAULT_MAX_QUEUE`/`DEFAULT_MAX_SIZE`/`DEFAULT_MAX_DAYS`、`CLIENT_BATCH_MAX`/`CLIENT_BATCH_INTERVAL_MS`/`CLIENT_PACKET_BYTES`/`CLIENT_QUEUE_MAX`、`LEGACY_LOG_DIR_NAME`/`LEGACY_SWITCH_FILE_NAME`；配置 `assertPluginId`、`resolveHostLogConfig`、`resolveClientLogConfig`、`PHONE_ACTIONS`；电话名 `buildPhoneName`、`buildPhoneNames`、`buildLogQueryPhoneName`、`LOG_QUERY_ACTION_SUFFIX`；文件名 `parseLogFileName`、`listLogFiles`、`logFilesOfDate`、`matchExportFileName`、`formatDailyFileName`、`formatFourSegmentFileName`、`resolveLogFileName`；清单 `parseEventListManifest`、`checkEventFields`、`lintEventFields`、`computeEventCounts`。
+- **宿主 `dsh-log/host`（23）**：建库 `createLogStore`、`createHostLog`；注册 `registerHostLogPhones`、`HOST_LOG_PHONE_ACTIONS`、`LOG_DIR_NAME`、`LOG_SWITCH_FILE`、`formatLogFileName`；跨插件聚合 `aggregateLogQuery`；其余（`LOG_FORMAT_VERSION`、`LOG_DEBOUNCE_MS`、`LOG_QUERY_ACTION_SUFFIX`、`buildPhoneName(s)`、`buildLogQueryPhoneName`、`resolveHostLogConfig`、`parseLogFileName`、`listLogFiles`、`logFilesOfDate`、`formatDailyFileName`、`parseEventListManifest`、`checkEventFields`、`lintEventFields`、`computeEventCounts`）是与根入口**同源**的转出口。
+- **客户端 `dsh-log/client`（17）**：建日志器 `createClientLog`；批量口径 `CLIENT_BATCH`、`LOG_BATCH_MAX`、`LOG_PACKET_BYTES`、`LOG_QUEUE_MAX`、`LOG_FLUSH_MS`、`LOG_WATCHDOG_MS`、`LOG_LEVELS`、`LOG_REV`、`LOG_DEBUG_KEY`、`debugStorageKey`；电话名 `buildClientPhoneNames`、`buildPhoneName(s)`、`buildLogQueryPhoneName`、`LOG_QUERY_ACTION_SUFFIX`、`resolveClientLogConfig`（其中电话名与配置部分与根入口同源）。
+- **Node `dsh-log/node`（4）**：`createQuickLog`（最省事：自动找目录、自带文件服务与计时器）、`createNodeHostLog`（要自己传 `cacheDir`）、`createNodeFileService`、`createNodeTimer`（后两个可以当宿主入口的 `fs`/`timer` 用）。
 
 ## 3. 三步接入（宿主侧）
 
