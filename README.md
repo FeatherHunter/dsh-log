@@ -627,7 +627,7 @@ CI 已把上面这些固化成**两条作业**（`.github/workflows/ci.yml`）�
 
 快照门禁只有黄/红两档（#18 Q6）：黄 warn——清单新增字段但快照未更新（`tests/snapshot.test.mjs` 只警告不判红，跑 `node tests/update-snapshots.mjs` 一键更新即转绿，不阻排障）；红 error——未知事件名、envelope 非法（落盘行五键 `{v,ts,level,event,fields}` 中 `v` 不为 3 或形状不对）、事件总数突变（与 `tests/event-snapshots/_baseline.json` 比 ±超 5 且 `tests/event-snapshots/CHANGELOG.md` 无说明；红的是“无 changelog”不是字段本身，补说明后跑更新命令即转绿）。事件条数就记在 `tests/event-snapshots/` 这套快照里，别在文档里抄数字。
 
-`npm test` 的用例清单来自 `package.json` 的 `test` 脚本（上面那二十四个文件、共 **215 例**；`pretest` 会先跑 `node build.mjs`，所以测试一定在最新产物上跑）。类型检查：`npm run typecheck`（脚本内已直调 `node node_modules/typescript/bin/tsc`，绕开仓库里那个指向失效路径的 `.bin/tsc` 垫片）。发行面那两套（`release-surface`、`consumer-types`）会把包按 junction 装进临时工程、用真 tsc 编译一次，所以「类型能不能被消费者用上」是门禁里跑出来的结论，不是文档里的承诺。
+`npm test` 的用例清单来自 `package.json` 的 `test` 脚本（上面那二十四个文件、共 **217 例**；`pretest` 会先跑 `node build.mjs`，所以测试一定在最新产物上跑）。类型检查：`npm run typecheck`（脚本内已直调 `node node_modules/typescript/bin/tsc`，绕开仓库里那个指向失效路径的 `.bin/tsc` 垫片）。发行面那两套（`release-surface`、`consumer-types`）会把包按 junction 装进临时工程、用真 tsc 编译一次，所以「类型能不能被消费者用上」是门禁里跑出来的结论，不是文档里的承诺。
 
 ### 9.1 源码分层（贡献者视角）
 
