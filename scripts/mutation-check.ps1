@@ -352,6 +352,64 @@ export interface LogTimer {" }
      tests = 'cli-tail'; pattern = '-f 跟读'
      from = "        if (arg === '-f' || arg === '--follow') {"
      to   = "        if (false) {" }
+  # M87 宿主链上下文：seq 不前进（同一上下文每行都报 0）→ 链内的先后顺序丢失。
+  @{ name = 'M87 链上下文 seq 不前进'; file = 'core/trace.js'
+     tests = 'host-trace'; pattern = '同上下文三行'
+     from = "            if (outcome !== 'skipped')"
+     to   = "            if (false)" }
+
+  # M88 宿主链上下文：child() 复用父 spanId → 「每一步一个 span」这条语义消失。
+  @{ name = 'M88 child 复用父 spanId'; file = 'core/trace.js'
+     tests = 'host-trace'; pattern = 'child()：traceId 不变'
+     from = "                spanId: overrides?.spanId ?? genId(8)"
+     to   = "                spanId: overrides?.spanId ?? spanId" }
+
+  # M89 宿主链上下文：不搬保留字 → SDK 自己注入的 traceId 直接覆盖调用方传的值（静默丢数据）。
+  @{ name = 'M89 上下文不搬保留字（静默覆盖调用方的值）'; file = 'core/trace.js'
+     tests = 'host-trace'; pattern = '保留字所有权'
+     from = "            if (relocated.shadow) {"
+     to   = "            if (false) {" }
+
+  # M90 公共面没挂 trace → store.trace 不是函数（宿主侧链上下文根本拿不到）。
+  @{ name = 'M90 公共面没挂 store.trace'; file = 'store.js'
+     tests = 'host-trace'; pattern = '同上下文三行'
+     from = "        trace: trace,"
+     to   = "        trace: undefined," }
+
+  # M91 低层 store.log 被接成上下文路径 → 不经上下文的调用方字段被改写（破坏「原样透传」回归线）。
+  @{ name = 'M91 低层 store.log 走上上下文（改写既有行为）'; file = 'store.js'
+     tests = 'host-trace'; pattern = '低层不变'
+     from = "        log: log,`r`n        trace: trace,"
+     to   = "        log: (level, event, fields) => trace().log(level, event, fields),`r`n        trace: trace," }
+
+  # M92 入口不写启动头（目录不自述）→ 第三方拿目录看不到「谁写的、哪一版」（research/18 §2.2 的缺口回来）。
+  @{ name = 'M92 入口不写启动头（目录不自述）'; file = 'node.js'
+     tests = 'startup-header'; pattern = '入口自动写启动头'
+     from = "    await store.writeStartupHeader();"
+     to   = "    void store;" }
+  # M93 导出摘要的版本回退成恒 unknown → 真记下来的 pluginVersion 被丢掉（对外承诺「摘要说真话」失效）。
+  @{ name = 'M93 摘要版本恒 unknown（丢掉真记的 pluginVersion）'; file = 'host/files.js'
+     tests = 'startup-header'; pattern = '入口自动写启动头'
+     from = "        pluginVersion: (headerInfo && headerInfo.pluginVersion) || 'unknown',"
+     to   = "        pluginVersion: 'unknown'," }
+
+  # M94 目录摘要不再点名「哪些格子读不出来」→ 交接文本里 unknown 成了无解释的黑洞。
+  @{ name = 'M94 摘要不点名读不出来的格子'; file = 'core/log-digest.js'
+     tests = 'cli-export'; pattern = '环境缺失一律 unknown'
+     from = "            unknown.push('header');"
+     to   = "            if (false) unknown.push('header');" }
+  # M95 export 静默忽略筛选选项 → 使用者以为筛过了，实际交出去的是整个目录（比报错更坏）。
+  @{ name = 'M95 export 静默忽略筛选选项'; file = 'cli/args.js'
+     tests = 'cli-export'; pattern = '筛选选项对 export 当场报错'
+     from = "    if (options.command === 'export') {"
+     to   = "    if (false) {" }
+  # M96 export 不做「半行切分」而直接按 \n 切 → 交出去的东西里留半截 JSON（永远解析不了）。
+  # （历史：原锚点想改 `if (line.trim() !== '')`，实测那条分支对半行本来就不承重——
+  #  半行是被 splitLogLines 归到 partial 里的，所以改成动切行这一步才是承重的。）
+  @{ name = 'M96 export 吐出半行（交出去的东西里留半截 JSON）'; file = 'cli/export.js'
+     tests = 'cli-export'; pattern = '只读：跑完 export'
+     from = "        const { lines } = splitLogLines(text);"
+     to   = "        const lines = text.split('\n');" }
   # M85 对齐时把 ANSI 转义也算进宽度 → 上色后整个人话列位推歪。
   @{ name = 'M85 对齐把 ANSI 算进宽度'; file = 'core/read-row.js'
      tests = 'format-row'; pattern = '渲染：默认不上色'
@@ -360,9 +418,10 @@ export interface LogTimer {" }
   # M86 子命令 tail 被当成目录名（2026-10-15 用户实测的 0.3.1 缺陷）：
   # 帮助写着 dsh-log tail <目录...>，实现却不认这个子命令 → 每次带子命令调用都白吐一行
   # 「没找到日志目录：tail」（退出码仍是 0、日志照常输出，所以只有肉眼看得见）。
+  # 0.3.3 起同一处判定也认 export，锚点跟着改成两子命令的形状。
   @{ name = 'M86 不认 tail 子命令（当成目录名）'; file = 'cli/args.js'
      tests = 'cli-tail'; pattern = '子命令 tail 真被认'
-     from = "        if (arg === 'tail' && !subcommandSeen && options.paths.length === 0) {"
+     from = "        if ((arg === 'tail' || arg === 'export') && !subcommandSeen && options.paths.length === 0) {"
      to   = "        if (false) {" }
 
   # M57 封存照单全收：rename 调完就当搬走了，不回查目录（2026-10-14 soak 实测的旧行为：

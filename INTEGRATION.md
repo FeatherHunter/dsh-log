@@ -225,7 +225,11 @@ npx dsh-log tail ./cache/logs-my-plugin -f         # 跟着看：先给最后 20
 npx dsh-log tail ./cache --level error --since 1h  # 只看近一小时的 error
 npx dsh-log tail ./cache --trace <traceId>         # 追一条链（按 traceId）
 npx dsh-log tail ./cache --json | jq .             # 回到机器态，交给 jq
+npx dsh-log export ./cache/logs-my-plugin > ticket.txt   # 交日志：摘要 + 原始行，自包含（贴工单、当附件）
+npx dsh-log export ./cache/logs-my-plugin --json | jq .rows  # 只要摘要对象
 ```
+
+`export` 的摘要里读不出来的格子会写 `unknown`——**不会拿跑命令那个进程的 cwd / 版本 / 平台顶替**；它的语义是原样交出整个目录，所以 `--level`/`--since`/`--trace`/`-n`/`-f` 传给它当场报错（要筛选用 `tail`）。想让摘要里 `pluginVersion` 有值，就在建库配置里加 `pluginVersion: '<你的版本>'`（宿主入口同步建库，要自述行再调一次 `await store.writeStartupHeader()`；`dsh-log/node` 入口已自动写）。
 
 目录给插件的日志目录（`logs-my-plugin`）或它的父目录（`cache`，里面是 `logs-*/`）都认。半行（有人正在写）与解析不了的行一律跳过；封存件按写入先后排在可写文件之前。子命令 `tail` 可写也可省——`npx dsh-log <目录...>` 与 `npx dsh-log tail <目录...>` 完全等价（只有第一个位置参数上的 `tail` 是子命令；目录名恰好叫 `tail` 时写 `./tail`）。
 

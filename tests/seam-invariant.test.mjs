@@ -102,7 +102,8 @@ describe('读写接缝不变式（0.3.0 Track 1）', () => {
         await h.store.synced()
         const disk = await diskRows(cacheDir, 'logs-seam-plain')
         const q = await queryAllRows(h.store)
-        assert.equal(disk.rows.length, 20)
+        // 入口建库时自动写一行目录自述（host.start）；用户行仍是 20 行，接缝不变式按整盘比。
+        assert.equal(disk.rows.filter((r) => String(r.event).indexOf('seam.plain.') === 0).length, 20)
         assert.deepEqual(eventsOf(q), eventsOf(disk.rows), '查询必须看到磁盘上的每一行')
         for (const r of disk.rows) assert.equal(keysOf(r), 'event,fields,level,ts,v')
         for (const r of disk.rows) assert.equal(r.v, 3)
@@ -156,8 +157,9 @@ describe('读写接缝不变式（0.3.0 Track 1）', () => {
         const diskTodayRows = disk.rows.filter(() => true).length
         assert.equal(textRows.length, diskTodayRows, '导出必须包含今天所有文件的行（含封存件）')
         assert.equal(exp.bytes, String(exp.text || '').length)
-        // 导出文本按写入先后拼接：第一行应是最早那批的行。
-        assert.ok(textRows[0].indexOf('seam.exp.0.0') >= 0, '导出顺序应为写入先后（可写文件在最前）')
+        // 导出文本按写入先后拼接：第一条**用户行**应是最早那批的行（启动头行不参与这条断言）。
+        const firstUserLine = textRows.find((line) => line.indexOf('seam.exp.') >= 0)
+        assert.ok(firstUserLine && firstUserLine.indexOf('seam.exp.0.0') >= 0, '导出顺序应为写入先后（最早那批在最前）')
       })
     } finally {
       await rm(cacheDir, { recursive: true, force: true })
@@ -216,7 +218,8 @@ describe('读写接缝不变式（0.3.0 Track 1）', () => {
         const disk = await diskRows(cacheDir, 'logs-seam-clr')
         const q = await queryAllRows(h.store)
         assert.deepEqual(eventsOf(q), eventsOf(disk.rows), '清空后两侧必须一致')
-        assert.deepEqual(eventsOf(q), ['seam.today.keep'])
+        // 今天只剩用户行与入口自动写的目录自述行（host.start）。
+        assert.deepEqual(eventsOf(q), ['host.start', 'seam.today.keep'])
       })
     } finally {
       await rm(cacheDir, { recursive: true, force: true })

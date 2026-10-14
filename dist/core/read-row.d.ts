@@ -19,6 +19,7 @@ export interface FormatRowOptions {
     /** 单个字段值的渲染上限（默认 200 字符），超出截断加 `…`。 */
     maxValueChars?: number;
 }
+export declare function formatLocalTime(ts: number): string;
 /**
  * 解析一行落盘文本；不是本包日志行（空行、半行、audit.json 那种没有 level/event 的 JSON、非 JSON）一律返回 null。
  * 判据就一条：有字符串型 `level` 与 `event`。这样 `audit.json` 里的 `{"ts":…,"op":"rotate.seal",…}` 会被自然跳过。

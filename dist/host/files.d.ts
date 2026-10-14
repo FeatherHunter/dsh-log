@@ -25,11 +25,7 @@ export declare function createLogFileHandlers(ctx: LogPhonesContext): {
             logSwitch: {
                 enabled: boolean;
             };
-            header: {
-                pid: number;
-                startedAt: string;
-                dir: string;
-            } | null;
+            header: import("../core/startup-header.js").StartupHeader | null;
         };
         dir: string;
         path: string;

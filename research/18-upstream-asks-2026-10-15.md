@@ -179,3 +179,37 @@ dsh-log --trace <id> ./cache/x      # 同一条链的全部环节，按 seq 排
 - 探针：`.local/probe-asks.mjs`（宿主行带三件套 + `--trace` 命中 + 导出摘要 + 无前缀目录扫描）、`.local/probe-header.mjs`（`host.start` 行真实字段 + 导出摘要）
 - 引用：`dist/store.d.ts:23`（三参 `log`）、`:63`（`handleLogExport`）、`dist/core/row.js:16`、`dist/client/write.js:110-122`、`dist/core/trace.js:17`（`relocateReservedFields` 只被客户端引用）、`dist/store.js:326-336`（`writeStartupHeader`）
 - 既有回归线：`tests/trace-24.test.mjs`（客户端链）、`tests/cli-tail.test.mjs`（读侧命令行）、`tests/paging-20.test.mjs`（`traceChain` 翻页）
+
+---
+
+## 8. 落地记录（0.3.3，2026-10-15）
+
+两条需求按第 3 节的修订方案落地，公共接口只增不改；每处都有回归线与变异钉着。
+
+**P1-A：宿主侧链上下文 `store.trace()`**
+
+- `src/core/trace.ts` 新增 `createHostTrace(input: HostTraceInput): HostTrace`（领域层、零 IO）：`log()` 先把调用方自带的保留字搬进 `fields._shadow` 并累加 `shadowWarns`，再注入上下文自己的 `traceId`/`spanId`/`seq`；**被开关挡下的行不占号**（与客户端同口径），`dropped` 与写失败照样占号；`child()` 继承 `traceId`、刷新 `spanId`、`seq` 从 0 起。
+- `src/store.ts` 的返回对象新增 `trace(input?)`（紧跟 `log`）。不经上下文的 `store.log()` **一字不变**（原样透传）——这一条有专门的回归线，防「顺手把低层也接上上下文」。
+- 回归线 `tests/host-trace.test.mjs` 6 例；变异 M87–M91（seq 不前进 / child 复用父 spanId / 不搬保留字 / 公共面没挂 trace / 低层被接成上下文路径）。
+
+**P0-B1：目录自述**
+
+- `src/core/startup-header.ts` 是启动头形状的**单源**（写侧、`src/host/types.ts`、读侧摘要共用）；`HostLogConfigInput` 新增可选 `pluginVersion`（≤64 字符、不校验写法、空串按没记）；`writeStartupHeader()` 记 `pluginVersion` 与平台 `os`（拿不到就不写这个键）。
+- `dsh-log/node` 入口建库时**自动写**一行 `host.start`（常驻事件，开关关着也落）；宿主入口是同步建库，保持手动 `await store.writeStartupHeader()`（README 与 INTEGRATION 写明）。
+- 宿主导出摘要的 `pluginVersion` 不再写死 `'unknown'`，而是认真记下来的值。
+- 回归线 `tests/startup-header.test.mjs` 4 例；变异 M92（入口不写启动头）、M93（摘要版本恒 unknown）。
+
+**P0-B2：`dsh-log export`**
+
+- `src/core/log-digest.ts`：累加器式目录摘要（`createLogDigest` → `addFile`/`setSwitch`/`finish`）+ `formatLogDigest`。级别/事件按次数降序、同次数按名字升序；`header` 取最后一条 `host.start`；`unknown` 逐个点名。
+- `src/cli/export.ts`：摘要 + 原始行（半行不进原始行段）；`switchCandidates` 只在目录名是本包派生形状时去认开关文件，猜不出就 `unknown`；**不提供 `-o`**（工具零写面，留档交给 shell 重定向）。
+- `dsh-log export` 与筛选选项互斥（`--level/--since/--trace/-n/-f` 传了当场报错）——静默忽略比报错更坏。
+- 回归线 `tests/cli-export.test.mjs` 6 例（含「不得出现读者的 cwd/platform」与「跑完目录一个字节不变」）；变异 M94（摘要不点名 unknown）、M95（静默忽略筛选）、M96（吐出半行）。
+
+**P0-B3：目录发现契约化**
+
+`src/cli/tail.ts` 的 `discoverLogDirs` 把四条行为写成契约（给日志目录 / 给根目录往下看一层 / **不要求 `logs-` 前缀** / 都不成立才算没找到），回归线在 `tests/cli-tail.test.mjs` 与 `tests/cli-export.test.mjs` 各一条。
+
+**门禁（本仓实测）**：`tsc` exit 0；`node build.mjs` → 52 个 `.d.ts`；`npm test` **215/215（24 套）**；变异表 **93 条全 RED、0 SKIP/GREEN**；`node scripts/pack-smoke.mjs` 通过；`npm pack --dry-run` → 109 个文件。
+
+**诚实边界**：①宿主入口不自述（同步建库，需显式调一次）；②`export` 不做筛选、不写文件（要筛选用 `tail`、要留档用重定向）；③摘要里 `pluginVersion`/`os` 只在写侧真记过时才有值，旧目录一律 `unknown`——这是设计，不是缺陷；④跨进程仍不设防（与本包其它部分一致）。

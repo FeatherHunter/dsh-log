@@ -1,5 +1,6 @@
 import { LOG_DEBOUNCE_MS, LOG_FORMAT_VERSION, formatDailyFileName, type HostLogConfigInput, type ResolvedHostLogConfig, type OnDropCallback } from './config.js';
 import type { LogOutcome } from './core/outcome.js';
+import type { StartupHeader } from './core/startup-header.js';
 import type { LogFileService, LogPlatform, LogTimer } from './platform/ports.js';
 export type { LogFileService, LogPlatform, LogPlatformFs, LogPlatformPath, LogTimer } from './platform/ports.js';
 export { LOG_DEBOUNCE_MS, LOG_FORMAT_VERSION, formatDailyFileName };
@@ -21,6 +22,10 @@ export declare function createLogStore(deps: LogStoreDeps, configInput?: HostLog
     config: ResolvedHostLogConfig;
     isEnabled: (level: string, event?: string) => boolean;
     log: (level: string, event: string, fields: Record<string, unknown>) => LogOutcome;
+    trace: (input?: {
+        traceId?: string;
+        spanId?: string;
+    }) => import("./core/trace.js").HostTrace;
     flush: () => {
         ok: boolean;
     };
@@ -46,16 +51,8 @@ export declare function createLogStore(deps: LogStoreDeps, configInput?: HostLog
     getSwitchState: () => {
         enabled: boolean;
     };
-    writeStartupHeader: () => Promise<{
-        pid: number;
-        startedAt: string;
-        dir: string;
-    } | null>;
-    getHeaderInfo: () => {
-        pid: number;
-        startedAt: string;
-        dir: string;
-    } | null;
+    writeStartupHeader: () => Promise<StartupHeader | null>;
+    getHeaderInfo: () => StartupHeader | null;
     handleLogBatch: (args: {
         entries?: unknown;
         droppedCount?: unknown;
@@ -85,11 +82,7 @@ export declare function createLogStore(deps: LogStoreDeps, configInput?: HostLog
             logSwitch: {
                 enabled: boolean;
             };
-            header: {
-                pid: number;
-                startedAt: string;
-                dir: string;
-            } | null;
+            header: StartupHeader | null;
         };
         dir: string;
         path: string;

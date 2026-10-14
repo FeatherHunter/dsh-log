@@ -55,8 +55,11 @@ test('A3 synced 后硬杀进程：20 行 error 一行不丢，且行行完整', 
     const file = join(cacheDir, 'logs-kill', todayName())
     const text = await readFile(file, 'utf8')
     const rows = parseRows(text)
-    assert.equal(rows.length, 20, 'synced 之后落盘必须恰好 20 行')
-    for (const r of rows) {
+    // 目录自述行（host.start）由入口在建库时自动写，属于引擎级事实；这里只数用户行。
+    const userRows = rows.filter((r) => r.event === 'kill.row')
+    assert.equal(rows.filter((r) => r.event === 'host.start').length, 1, '启动头必须恰有一行')
+    assert.equal(userRows.length, 20, 'synced 之后用户行必须恰好 20 行')
+    for (const r of userRows) {
       assert.deepEqual(Object.keys(r).sort(), ['event', 'fields', 'level', 'ts', 'v'])
       assert.equal(r.v, 3)
       assert.equal(r.level, 'error')
@@ -64,7 +67,7 @@ test('A3 synced 后硬杀进程：20 行 error 一行不丢，且行行完整', 
       assert.equal(typeof r.fields.i, 'number')
       assert.equal(r.fields.payload.length, 64)
     }
-    const idx = rows.map((r) => r.fields.i).sort((a, b) => a - b)
+    const idx = userRows.map((r) => r.fields.i).sort((a, b) => a - b)
     assert.deepEqual(idx, Array.from({ length: 20 }, (_, i) => i), '序号 0..19 齐全且不重')
   } finally {
     await rm(cacheDir, { recursive: true, force: true })
@@ -82,10 +85,11 @@ test('A3 没 synced 就硬杀：允许丢行，但绝不许落半行（丢得干
       return
     }
     const rows = parseRows(await readFile(file, 'utf8'))
-    assert.ok(rows.length <= 20, '行数不可能超过写过的 20 行')
+    // 允许丢用户行（没 synced 就死），但每一行都必须是完整的一行；启动头行也照此要求。
+    assert.ok(rows.length <= 21, '行数不可能超过写过的 20 行用户行加一行启动头')
     for (const r of rows) {
       assert.equal(r.v, 3)
-      assert.equal(r.event, 'kill.row')
+      assert.ok(r.event === 'kill.row' || r.event === 'host.start', '只可能是用户行或启动头行')
     }
   } finally {
     await rm(cacheDir, { recursive: true, force: true })
@@ -109,9 +113,10 @@ test('A3 跨进程无登记（文档写明的风险）：子进程死后父进�
 
     const after = await readFile(file, 'utf8')
     const rows = parseRows(after)
+    const userRows = rows.filter((r) => r.event === 'kill.row' || r.event === 'kill.takeover')
     assert.ok(rows.length > before, '接管后新行应追加到同一文件（追加而不是覆盖）')
-    assert.equal(rows[0].event, 'kill.row', '老行仍在（追加语义）')
-    assert.equal(rows[rows.length - 1].event, 'kill.takeover')
+    assert.equal(userRows[0].event, 'kill.row', '老行仍在（追加语义）')
+    assert.equal(userRows[userRows.length - 1].event, 'kill.takeover')
   } finally {
     await rm(cacheDir, { recursive: true, force: true })
   }

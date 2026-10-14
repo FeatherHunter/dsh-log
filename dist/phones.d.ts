@@ -29,11 +29,7 @@ export declare function createLogPhones(ctx: LogPhonesContext): {
             logSwitch: {
                 enabled: boolean;
             };
-            header: {
-                pid: number;
-                startedAt: string;
-                dir: string;
-            } | null;
+            header: import("./core/startup-header.js").StartupHeader | null;
         };
         dir: string;
         path: string;

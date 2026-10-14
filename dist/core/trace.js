@@ -5,6 +5,7 @@
 // 不拒收整行，而是把冲突的值搬进 fields._shadow 并计数（error 本体照落）。
 // 这条规则从前写在 client.ts 的 log() 体内，现在单源一份——谁要给别的写入路径
 // （宿主侧、电话侧）也做同样的搬迁，读这里就够了，不必去抄一遍循环。
+import { genHex } from './ids.js';
 // 保留字：客户端追踪链路自己要用这三个键，调用方传的同名值让位。
 export const RESERVED_TRACE_FIELDS = ['traceId', 'spanId', 'seq'];
 // 让位后的落脚点：`fields._shadow.{traceId,spanId,seq}`。
@@ -54,4 +55,50 @@ export function relocateReservedFields(userFields) {
         void e;
     }
     return { fields, shadow };
+}
+export function createHostTrace(input) {
+    const genId = input.genId ?? genHex;
+    const traceId = input.traceId ?? genId(16);
+    const spanId = input.spanId ?? genId(8);
+    let seq = 0;
+    let shadowWarns = 0;
+    const trace = {
+        get traceId() {
+            return traceId;
+        },
+        get spanId() {
+            return spanId;
+        },
+        get shadowWarns() {
+            return shadowWarns;
+        },
+        log(level, event, fields) {
+            const userFields = fields && typeof fields === 'object' ? fields : {};
+            const relocated = relocateReservedFields(userFields);
+            const out = relocated.fields;
+            if (relocated.shadow) {
+                out[SHADOW_FIELD] = relocated.shadow;
+                shadowWarns += 1;
+            }
+            out.traceId = traceId;
+            out.spanId = spanId;
+            const current = seq;
+            out.seq = current;
+            const outcome = input.emit(level, event, out);
+            // 被开关挡下的行不算进序号（客户端同口径：skip 不消耗 seq）；丢掉/写失败的行照样消耗
+            // —— 那个序号已经给出去了，回头补写会让两条行撞号。
+            if (outcome !== 'skipped')
+                seq = current + 1;
+            return outcome;
+        },
+        child(overrides) {
+            return createHostTrace({
+                emit: input.emit,
+                genId: genId,
+                traceId: overrides?.traceId ?? traceId,
+                spanId: overrides?.spanId ?? genId(8)
+            });
+        }
+    };
+    return trace;
 }

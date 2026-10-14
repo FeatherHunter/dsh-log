@@ -1,5 +1,6 @@
 import type { ResolvedHostLogConfig } from '../config.js';
 import type { LogFileService, LogPlatform } from '../platform/ports.js';
+import type { StartupHeader } from '../core/startup-header.js';
 export interface LogQueryTimeRange {
     start?: unknown;
     end?: unknown;
@@ -47,11 +48,7 @@ export interface LogPhonesContext {
     getSwitchState: () => {
         enabled: boolean;
     };
-    getHeaderInfo: () => {
-        pid: number;
-        startedAt: string;
-        dir: string;
-    } | null;
+    getHeaderInfo: () => StartupHeader | null;
     loadSwitch: () => Promise<{
         enabled: boolean;
     }>;

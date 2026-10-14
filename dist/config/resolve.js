@@ -16,6 +16,7 @@ export function resolveHostLogConfig(input) {
         throw new Error('[dsh-log] 建日志库缺少配置：电话名前缀 prefix 必填（须显式传入，不再回退到 pluginId）');
     const pluginId = assertPluginId(input.pluginId, '插件标识 pluginId');
     const prefix = assertPluginId(input.prefix, '电话名前缀 prefix');
+    const pluginVersion = resolvePluginVersion(raw['pluginVersion']);
     // 目录与开关文件名默认派生（非 #18 回退：此处 'wf' 分支是 legacy 兼容派生，非缺参回退，缺参已在上抛错）；
     const logDirName = input.logDirName !== undefined
         ? input.logDirName
@@ -54,6 +55,7 @@ export function resolveHostLogConfig(input) {
     return {
         pluginId: pluginId,
         prefix: prefix,
+        pluginVersion: pluginVersion,
         logDirName: logDirName,
         switchFileName: switchFileName,
         fileNamePolicy: fileNamePolicy,
@@ -79,4 +81,20 @@ export function resolveClientLogConfig(input) {
         eventList = parseEventListManifest(eventList);
     }
     return { pluginId: pluginId, prefix: prefix, eventList: eventList };
+}
+// 插件版本上限：够长到装下「0.3.2-rc.1+build.7」这类写法，又短到不会把启动头行撑大。
+const PLUGIN_VERSION_MAX = 64;
+// 插件版本是可选自由文本：只做「是字符串 + 修剪 + 长度上限」三件事，不校验版本号语义
+// （版本号的写法各家不同，本包不替调用方定标准）；没传或空串一律按「没记」处理。
+function resolvePluginVersion(value) {
+    if (value === undefined || value === null)
+        return '';
+    if (typeof value !== 'string') {
+        throw new Error('[dsh-log] 建日志库配置里 pluginVersion 必须是字符串（可省略；它只用于写进启动头 host.start 行）');
+    }
+    const trimmed = value.trim();
+    if (trimmed.length > PLUGIN_VERSION_MAX) {
+        throw new Error('[dsh-log] 建日志库配置里 pluginVersion 太长：' + trimmed.length + ' 字符，上限 ' + PLUGIN_VERSION_MAX);
+    }
+    return trimmed;
 }

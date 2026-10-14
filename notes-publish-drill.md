@@ -2,7 +2,31 @@
 
 这份文件记的是「发出去的是什么」：每发一版，把原始输出与关键数字留在下面，供下一个人复现和核对。文中的字节数、文件数都描述**当时发出去的那一份**，不是当前工作区。0.2.0 是首次公开发布，随 Node 程序入口一起上线；此前只有本地演练（见第四节）。
 
-## 〇.0 dsh-log 0.3.2（已发布，2026-10-15 01:37 +08:00）
+## 〇.0 dsh-log 0.3.3（待发布，2026-10-15）
+
+**状态**：代码/文档/记录已就绪，**尚未发布**（要发布就按第三节走向导，需要 npm 凭据）。
+
+**改了什么**（三件加法，公共接口只增不改）：
+
+1. **宿主侧链上下文 `store.trace()`**：宿主写日志不必自己造 `traceId/spanId/seq`——`trace()` 建链、`child()` 刷新 `spanId` 并把 `seq` 归零、调用方自带的保留字搬进 `fields._shadow`（谁声明链路谁拥有保留字）；被开关挡下的行不占号。不经上下文的 `store.log()` 一字不变。
+2. **目录自述**：`dsh-log/node` 建库时自动写一行 `host.start`（常驻事件，开关关着也落），字段含 `pid`/`startedAt`/`dir` 与可选的 `pluginVersion`/`os`；建库配置新增可选项 `pluginVersion`（≤64 字符，不校验写法）；宿主导出摘要的 `pluginVersion` 不再恒为 `unknown`。宿主入口是同步建库，要自述行就显式 `await store.writeStartupHeader()`。
+3. **`dsh-log export`**：交日志的第二个子命令——目录摘要 + 原始行，自包含；读不出来的格子如实写 `unknown`，**不拿读者环境（cwd/平台/版本）顶替**；与筛选选项互斥（传了当场报错）；工具仍然零写面（留档交给 shell 重定向）。顺带把「目录发现不要求 `logs-` 前缀」写成契约并补了回归线。
+
+**发布前门禁（本仓实测，全过）**：
+
+| 门禁 | 结果 |
+|---|---|
+| `node node_modules/typescript/bin/tsc -p tsconfig.json` | exit 0 |
+| `node build.mjs` | 52 个 JS + 52 个 `.d.ts` |
+| `npm test` | **215/215（24 套）** |
+| `node scripts/mutation-check.ps1`（pwsh 7） | **93 条全 RED、0 SKIP/GREEN** |
+| `node scripts/pack-smoke.mjs` | 通过（真打包 + 真装进全新工程 + 真写一行五键 `v=3`） |
+| `npm pack --dry-run` | `dsh-log-0.3.3.tgz`，109 个文件 |
+
+**发布后四项核对（照 0.3.0/0.3.1/0.3.2 的老规矩做）**：①源上 `dist-tags.latest` 与 `gitHead` 对齐本仓 HEAD；②包内四份文档（README/INTEGRATION/LICENSE/模板）SHA256 与仓库逐字一致；③陌生机器（全新 `--cache` 目录）装一次：`createQuickLog` 写一行五键 `v=3`、`await log.ready` 回 `{ok:true,pending:0,lastPersistFail:null}`、`dsh-log tail` 与 `dsh-log export` 都能跑、`--version` = 0.3.3；④本节记录原始输出。
+
+**回滚口径**：`npm deprecate dsh-log@0.3.3 '<原因>'`，不做 `unpublish`。
+## 〇.1 dsh-log 0.3.2（已发布，2026-10-15 01:37 +08:00）
 
 **状态**：已发布到官方源，`dist-tags.latest` = **0.3.2**。发布者 `feather_wch`（自动化 token，只写进 `%TEMP%` 的临时 npmrc、`npm publish --userconfig <该文件>`，发完即删——仓库里没有 `.npmrc`）。
 
@@ -36,7 +60,7 @@ npm notice total files: 103
 
 **回滚口径**：若发现严重问题，用 `npm deprecate dsh-log@0.3.2 "原因"` 标废弃，不做 `unpublish`。
 
-## 〇.1 dsh-log 0.3.1（已发布，2026-10-14 19:41 +08:00）
+## 〇.2 dsh-log 0.3.1（已发布，2026-10-14 19:41 +08:00）
 
 **状态**：已发布到官方源，`dist-tags.latest` = **0.3.1**。发布者 `feather_wch`（维护者本人），用自动化 token；token 只写进 `%TEMP%` 的临时 npmrc（`npm publish --userconfig <该文件>`），发完即删，**仓库里没有 `.npmrc`**。发布命令：`npm publish --userconfig <临时 npmrc>`。
 

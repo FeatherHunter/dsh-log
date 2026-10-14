@@ -424,6 +424,23 @@ npx dsh-log tail ./logs --json | jq 'select(.level=="error") | .event'
 
 目录给插件的日志目录（里面是 `YYYY-MM-DD.log`）或日志根目录（里面是 `logs-<pluginId>/`）都认；封存件按写入先后排在可写文件之前；半行与解析不了的行一律跳过。子命令 `tail` **可写也可省**——`dsh-log <目录...>` 与 `dsh-log tail <目录...>` 完全等价；只有第一个位置参数上的 `tail` 会被当成子命令（目录名恰好叫 `tail` 时写 `./tail`）。
 
+**把日志交出去**（`dsh-log export`，同一件工具的第二个子命令；同样只读，要留档请用 shell 重定向）：
+
+```bash
+npx dsh-log export ./logs-my-plugin > ticket.txt    # 摘要 + 原始行：贴工单、当附件都够
+npx dsh-log export ./logs-my-plugin --json | jq .rows   # 只要摘要对象（给脚本用；要行用 tail --json）
+```
+
+输出两段：**目录摘要**（目录、文件清单与字节数、行数、时间范围、级别与事件分布、启动头、开关状态、哪些格子读不出来）+ **原始行**（原样，一个字节都不改）。摘要里的 `unknown` 是**如实**：没记过就说没记过——它绝不会拿「跑这条命令那个进程」的 cwd / 版本 / 平台来顶替（把读者的环境写成写者的事实，比留空更糟）。`export` 的语义是原样交出整个目录，所以 `--level`/`--since`/`--trace`/`-n`/`-f` 传给它**会当场报错**，不静默忽略。
+
+**目录怎么自己说清「谁写的」**：Node 入口（`dsh-log/node`）建库时自动写一行 `host.start`（常驻事件，开关关着也落）：
+
+```json
+{"v":3,"ts":1791980000000,"level":"info","event":"host.start","fields":{"pid":41232,"startedAt":"2026-10-15T03:00:00.000Z","dir":"D:\\cache","pluginVersion":"1.2.3","os":"win32"}}
+```
+
+`pluginVersion` 由建库配置传入（见第 4 节）、`os` 由平台对象报出，拿不到就不写这个键。宿主入口（`dsh-log/host`）是同步建库，要自述行就显式调一次 `await store.writeStartupHeader()`。
+
 ## 4. 配置默认值派生（#558 冻结）
 
 必填两项：插件标识 `pluginId` 与电话名前缀 `prefix`，都要显式传入，缺任一即抛中文错（0.2.x 的「prefix 缺省回退到 pluginId」已删）。两者同一套字符约束：只能用小写英文字母、数字、中横线，长度 1 到 32。收到大写直接报错，不做静默转小写；收到含点或文件不安全字符（斜杠、反斜杠、冒号、星号、问号、引号、尖括号、竖线、空格）的值同样报错，因为点留作前缀与动作名之间的分隔符，拼进目录名与文件名后必须仍是合法名字。
@@ -432,6 +449,7 @@ npx dsh-log tail ./logs --json | jq 'select(.level=="error") | .event'
 |---|---|---|
 | `pluginId` | 必填，无默认 | 插件标识；目录名与开关文件名按它派生 |
 | `prefix` | 必填，无默认（不再回退到 `pluginId`） | 电话名前缀；新电话名 = 前缀 + 点 + 动作名 |
+| `pluginVersion` | `''`（不写这个键） | 可选的环境自述：写进启动头 `host.start` 行，最长 64 字符、不校验写法（各家版本号写法不同，本包不替调用方定标准）。不传就是没记——摘要里如实写 `unknown`，绝不拿读者的版本顶替 |
 | `logDirName` | 派生 | 标识为 `wf` 时为 `logs`，其他标识时为 `logs-标识`；允许显式覆盖 |
 | `switchFileName` | 派生 | 标识为 `wf` 时为 `log-switch.json`，其他标识时为 `log-switch-标识.json`；允许显式覆盖 |
 | `fileNamePolicy` | `daily` | 按天（年月日点 log，如 `2026-09-06.log`）；四段式只作可选项 |
@@ -500,6 +518,19 @@ clientLog.log('info', 'my.event', { step: 'started' })   // info 需开关打开
 - **可解释**：`log.why()` 回报三件套的来源（新建/继承/透传）与影子计数（`shadowWarns`）。
 - **保留字冲突永不整行拒收**：`fields` 里误带 `traceId`/`spanId`/`seq` 时，`error`/`warn` 照落盘，冲突的值搬进 `fields._shadow`，另落一行 `log.trace.shadow`（warn 级）并计入 `shadowWarns`。可靠性优先于正确性。
 - **查询联动**：`logQuery` 的 `traceId` 是一等参；整链查询走独立 `traceChain` 通道，**超 100 行也不断链**（不受 `limit ≤ 100` 截断）。跨桶伪造 `traceId` 的读会被拒（`denied`），但源行不会被删。
+
+**宿主侧也有链上下文**（`store.trace()`，0.3.3 起）：宿主写日志不必自己造三件套——
+
+```ts
+const task = log.store.trace()                        // 建一个链上下文：traceId 自动生成
+task.log('info', 'task.start', { message: '开始处理' })
+const step = task.child()                             // 子上下文：traceId 不变、spanId 换新、seq 从 0 起
+step.log('warn', 'task.step.slow', { message: '这一步慢了' })
+task.log('error', 'task.fail', { message: '失败' })   // 父上下文 seq 接着走
+task.shadowWarns                                      // 调用方自带的保留字被搬进 fields._shadow 的次数
+```
+
+规则：**谁声明链路谁拥有保留字**——经 `trace()` 写的行，调用方传的 `traceId`/`spanId`/`seq` 会被搬进 `fields._shadow`（主行用上下文的那份）；被开关挡下的行**不占号**（与客户端同口径，`dropped` 与写失败照样占号）。不经上下文的 `store.log()` 一律**原样透传**（0.3.0 起的行为一字不变，有回归线钉着）。
 
 ## 6. 失败语义（#558 冻结）
 
@@ -581,12 +612,12 @@ node build.mjs
 npm publish --dry-run
 ```
 
-`node build.mjs` 先跑 `tsc --noEmit` 类型检查，把 `src` 下 49 个可转译 TS（含子目录，按目录结构一对一转译；不含 `node-ambient.d.ts` 这类声明文件）写进 `dist`（转译优先用 esbuild，没装 esbuild 时自动回退 TypeScript 自带转译器；可执行入口的 shebang 会被补回**第一行**，否则 `npx dsh-log` 装出来不能执行），最后再用 `tsconfig.build.json` 产出与 `src` 同形的 `dist/**/*.d.ts`——**声明由 tsc 出，不由转译器猜**（缺一个声明，构建就报错退出）。发布白名单（`files`）打进 103 个文件：`dist` 下 49 个 JS + 49 个 `.d.ts`、`event-list.template.json`、`INTEGRATION.md`、`README.md`、`LICENSE`、`package.json`（`npm publish --dry-run` 可自查：文件数与体积以**当次**输出为准——它们随打包时刻变化，本文件不抄具体值）。加新文件进包时同步改 `files` 并重跑 dry-run 确认文件数；改了 `src` 必须重跑 build——本仓当前把 `dist` 一并提交，只改 `src` 不生成产物会留下过期实现。
+`node build.mjs` 先跑 `tsc --noEmit` 类型检查，把 `src` 下 52 个可转译 TS（含子目录，按目录结构一对一转译；不含 `node-ambient.d.ts` 这类声明文件）写进 `dist`（转译优先用 esbuild，没装 esbuild 时自动回退 TypeScript 自带转译器；可执行入口的 shebang 会被补回**第一行**，否则 `npx dsh-log` 装出来不能执行），最后再用 `tsconfig.build.json` 产出与 `src` 同形的 `dist/**/*.d.ts`——**声明由 tsc 出，不由转译器猜**（缺一个声明，构建就报错退出）。发布白名单（`files`）打进 109 个文件：`dist` 下 52 个 JS + 52 个 `.d.ts`、`event-list.template.json`、`INTEGRATION.md`、`README.md`、`LICENSE`、`package.json`（`npm publish --dry-run` 可自查：文件数与体积以**当次**输出为准——它们随打包时刻变化，本文件不抄具体值）。加新文件进包时同步改 `files` 并重跑 dry-run 确认文件数；改了 `src` 必须重跑 build——本仓当前把 `dist` 一并提交，只改 `src` 不生成产物会留下过期实现。
 
 门禁跑法（改包后全跑，退出码全 0 才算过）：
 
 ```sh
-npm test                              # = node --test "tests/*.test.mjs"：宿主、客户端、事件清单、Node 入口、全栈隔离、轮转与保留、常驻级别（清单声明放行）、运行时行为（T7）、快照门禁、查询分页（#20）、追踪链路（#24）、端到端真机链路、接缝不变式（#25）、硬杀耐久（#23）、追加写、读侧渲染、读侧命令行、发行面（#27）、消费方类型编译（#27）、公开面快照、架构门禁（分层与环）——共二十一个测试文件、node 自报 21 套
+npm test                              # = node --test "tests/*.test.mjs"：宿主、客户端、事件清单、Node 入口、全栈隔离、轮转与保留、常驻级别（清单声明放行）、运行时行为（T7）、快照门禁、查询分页（#20）、追踪链路（#24）、端到端真机链路、接缝不变式（#25）、硬杀耐久（#23）、追加写、读侧渲染、读侧命令行、读侧导出（目录摘要）、目录自述（启动头）、宿主链上下文（store.trace）、发行面（#27）、消费方类型编译（#27）、公开面快照、架构门禁（分层与环）——共二十四个测试文件、node 自报 24 套
 node --test tests/snapshot.test.mjs   # 单跑快照确认制门禁
 node tests/update-snapshots.mjs       # 清单新增字段后：先把黄转绿再提交（这是更新快照，不是判绿）
 node scripts/pack-smoke.mjs           # 打包冒烟：真打包 + 真装进全新工程 + 真写一行（发行面一层）
@@ -596,7 +627,7 @@ CI 已把上面这些固化成**两条作业**（`.github/workflows/ci.yml`）�
 
 快照门禁只有黄/红两档（#18 Q6）：黄 warn——清单新增字段但快照未更新（`tests/snapshot.test.mjs` 只警告不判红，跑 `node tests/update-snapshots.mjs` 一键更新即转绿，不阻排障）；红 error——未知事件名、envelope 非法（落盘行五键 `{v,ts,level,event,fields}` 中 `v` 不为 3 或形状不对）、事件总数突变（与 `tests/event-snapshots/_baseline.json` 比 ±超 5 且 `tests/event-snapshots/CHANGELOG.md` 无说明；红的是“无 changelog”不是字段本身，补说明后跑更新命令即转绿）。事件条数就记在 `tests/event-snapshots/` 这套快照里，别在文档里抄数字。
 
-`npm test` 的用例清单来自 `package.json` 的 `test` 脚本（上面那二十一个文件、共 **197 例**；`pretest` 会先跑 `node build.mjs`，所以测试一定在最新产物上跑）。类型检查：`npm run typecheck`（脚本内已直调 `node node_modules/typescript/bin/tsc`，绕开仓库里那个指向失效路径的 `.bin/tsc` 垫片）。发行面那两套（`release-surface`、`consumer-types`）会把包按 junction 装进临时工程、用真 tsc 编译一次，所以「类型能不能被消费者用上」是门禁里跑出来的结论，不是文档里的承诺。
+`npm test` 的用例清单来自 `package.json` 的 `test` 脚本（上面那二十四个文件、共 **215 例**；`pretest` 会先跑 `node build.mjs`，所以测试一定在最新产物上跑）。类型检查：`npm run typecheck`（脚本内已直调 `node node_modules/typescript/bin/tsc`，绕开仓库里那个指向失效路径的 `.bin/tsc` 垫片）。发行面那两套（`release-surface`、`consumer-types`）会把包按 junction 装进临时工程、用真 tsc 编译一次，所以「类型能不能被消费者用上」是门禁里跑出来的结论，不是文档里的承诺。
 
 ### 9.1 源码分层（贡献者视角）
 
@@ -611,13 +642,14 @@ CI 已把上面这些固化成**两条作业**（`.github/workflows/ci.yml`）�
           host/    query（只读查询电话）· files（导出/清空）· aggregate（查时授权聚合）· context · types
           client/  write（主写路径）· send（取批/裁剪/重试位）· switch-ops · switch-cache ·
                    trace（追踪三件套）· forward（丢弃汇总）· transport · types
-          cli/     args（命令行参数解析）· tail（按写序读、渲染、跟读）
+          cli/     args（命令行参数解析）· tail（按写序读、渲染、跟读）· export（交日志：摘要 + 原始行）
    ↓
 配置面    config.ts（门面，只 re-export）+ config/  validate · constants · phones · log-names · resolve · event-list
    ↓
 平台层    platform/  ports（端口形状）· fs-node · timer-node · read-node（只读文件能力）· later
    ↓
 领域层    core/  file-name（文件名解析单源）· level（级别语义单源）· row · retention · admission · trace ·
+                 startup-header（启动头形状单源）· log-digest（目录摘要：累加器 + 人话形态）·
                  ids · outcome · read-row（把一行变回人话：纯函数、零 IO）
           ← 零 IO、零上层：换平台、纯函数单测、以及「哪些级别永不丢」这类判定都靠这一层
 ```
@@ -654,6 +686,14 @@ CI 已把上面这些固化成**两条作业**（`.github/workflows/ci.yml`）�
 1. **`dsh-log tail` 的子命令现在真被认**。帮助里一直写着 `dsh-log tail <目录...>`，0.3.1 的实现却把 `tail` 当成一个目录名——于是每次带子命令调用都会在 stderr 白吐一行 `dsh-log: 没找到日志目录：tail`（退出码仍是 0、日志照常输出，所以只有肉眼看得见）。修后 `dsh-log tail <目录...>` 与 `dsh-log <目录...>` **完全等价**、stderr 干净；只有第一个位置参数上的 `tail` 会被当成子命令（目录名恰好叫 `tail` 时写 `./tail`）。
 
 升级方式：`npm i dsh-log@0.3.2`，现有代码不需要改。
+
+**0.3.3（2026-10-15）**：把「上游插件提的两条需求」落成三件加法（公共接口只增不改，老代码不用动）：
+
+1. **宿主侧链上下文 `store.trace()`**：宿主写日志不必自己造 `traceId/spanId/seq`——`trace()` 建链、`child()` 刷新 `spanId` 并重置 `seq`、保留字冲突搬进 `fields._shadow`（规则见 5.3）。不经上下文的 `store.log()` 一字不变。
+2. **目录自述**：`dsh-log/node` 建库时自动写一行 `host.start`（`pid`/`startedAt`/`dir` + 可选的 `pluginVersion`/`os`）；建库配置新增可选项 `pluginVersion`；宿主导出摘要的 `pluginVersion` 不再恒为 `unknown`，而是认真记下来的值。
+3. **`dsh-log export`**：交日志的第二个子命令——摘要 + 原始行，自包含；读不出来的格子如实写 `unknown`，**不拿读者环境顶替**（见 3.2）。顺带把「目录发现不要求 `logs-` 前缀」写成契约并补了两条回归线。
+
+升级方式：`npm i dsh-log@0.3.3`；想让自己插件的日志目录自述版本，就在建库配置里加 `pluginVersion: '<你的版本>'`。
 
 ## 11. 安全声明与许可证
 

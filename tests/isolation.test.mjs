@@ -299,8 +299,10 @@ describe('#19 全栈隔离（五层契约）', () => {
       )
       const busyRows = await readRows(cacheDir, 'logs-iso-busy')
       assert.ok(busyRows.length > 0, 'A 自己被限流但仍应落下一部分')
+      // 启动头（host.start）是引擎自述行，允许出现在自己的目录里；除它以外只该有 A 自己的行。
+      const busyUserRows = busyRows.filter((r) => r.event !== 'host.start')
       assert.ok(
-        busyRows.every((r) => String(r.event).startsWith('iso.busy')),
+        busyUserRows.every((r) => String(r.event).startsWith('iso.busy')),
         'A 的目录里只该有 A 自己的行'
       )
       busy.store.release()
@@ -1221,7 +1223,9 @@ describe('#19 全栈隔离（五层契约）', () => {
       const one = await hostMod.aggregateLogQuery('iso-u2-a', sources, ['iso-u2-b'], { page: { limit: 1 } })
       assert.equal(one.entries.length, 1, 'limit=1 必须只回一行（跨源合并后截断）')
       const all = await hostMod.aggregateLogQuery('iso-u2-a', sources, ['iso-u2-b'], { page: { limit: 100 } })
-      assert.equal(all.entries.length, 6, 'limit=100 应回满六行')
+      const userEntries = all.entries.filter((e) => String(e.event).indexOf('u2.') === 0)
+      assert.equal(userEntries.length, 6, 'limit=100 应回满六行用户行')
+      assert.equal(all.entries.length, 8, '六行用户行加两条目录自述行（host.start，每个实例一条）')
       for (let i = 1; i < all.entries.length; i++) {
         assert.ok(all.entries[i - 1].ts >= all.entries[i].ts, '合并结果必须 ts 倒序')
       }

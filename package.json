@@ -1,7 +1,7 @@
 {
   "name": "dsh-log",
-  "version": "0.3.2",
-  "description": "可复用的日志系统：宿主落盘引擎 + 读侧工具（五键行、存时硬隔离查时授权聚合、error 永不丢；0.3.1 起带 formatRow 与人话命令行 dsh-log tail）",
+  "version": "0.3.3",
+  "description": "可复用的日志系统：宿主落盘引擎 + 读侧工具（五键行、存时硬隔离查时授权聚合、error 永不丢；0.3.1 起带 formatRow 与人话命令行 dsh-log tail，0.3.3 起带宿主链上下文 store.trace()、目录自述与 dsh-log export）",
   "license": "MIT",
   "author": "王辰浩",
   "repository": {

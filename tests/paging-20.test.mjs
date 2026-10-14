@@ -85,7 +85,8 @@ describe('#20 A3 分页确定性（0.3.0 keyset 游标）', () => {
       await a.store.synced()
       const p1 = await a.store.handleLogQuery({ page: { limit: 1 } })
       const rest = await pageThrough(a.store, 1, p1.nextCursor)
-      const seen = p1.entries.map((e) => e.event).concat(rest.seen)
+      // 只看这三条同内容用户行（目录自述行 host.start 不参与这条断言）。
+      const seen = p1.entries.map((e) => e.event).concat(rest.seen).filter((e) => e === 'dup.same')
       assert.deepEqual(seen, ['dup.same', 'dup.same', 'dup.same'], '三行同内容行都要发出来，且只发一次')
       a.store.release()
     } finally {

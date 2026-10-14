@@ -33,6 +33,8 @@ import { isErrorLevel, isUrgentLevel } from './core/level.js'
 import { findEvictableIndex } from './core/admission.js'
 import { dayNumber, nextSealIndex, retentionCutoff, sealedNameOf, selectExpiredFiles } from './core/retention.js'
 import { logFileDate } from './core/file-name.js'
+import { createHostTrace } from './core/trace.js'
+import type { StartupHeader } from './core/startup-header.js'
 import { createLogPhones } from './phones.js'
 import { createEngineIo } from './engine/io.js'
 import { createRotation } from './engine/rotation.js'
@@ -310,7 +312,9 @@ export function createLogStore(deps: LogStoreDeps, configInput?: HostLogConfigIn
     }
   }
   // 启动头信息：每次启动写入进程标识、启动时间与实际目录，事后能区分哪几行来自哪个进程。
-  let headerInfo: { pid: number; startedAt: string; dir: string } | null = null
+  // pluginVersion 与 os 是**可选的环境自述**：调用方给了（或平台对象报得出）才记，
+  // 拿不到就是空串——读侧据此写 unknown，绝不用「读日志那个进程」的环境顶替（research/18 §2.2）。
+  let headerInfo: StartupHeader | null = null
   // 进程身份在建库那一刻定下来，全生命周期复用。
   // 为什么必须固定：四段式文件名里带启动时间，而它原来取不到启动头就每次现算 `new Date()`——
   // 于是每次刷盘都算出一个新名字，四段式退化成「一次刷盘一个文件」：永远不封存、保留清理算不清，
@@ -369,18 +373,37 @@ export function createLogStore(deps: LogStoreDeps, configInput?: HostLogConfigIn
   // engine/switch-file.ts（S4 第五块）：形状 {enabled}、旧文件多带的键忽略、占用键取开关文件本身。
   // 归属判定留在组合根：下面 claimSwitchKey 回答「能不能占这个键」，模块只管读写。
   // 启动头：每次启动在日志头写入进程标识、启动时间与实际目录；目录漂移时写实际目录头、不迁移旧日志。
-  async function writeStartupHeader(): Promise<{ pid: number; startedAt: string; dir: string } | null> {
+  // 环境自述（pluginVersion/os）有则记、无则空——它是「目录自己说清这一版是谁写的」那一行，
+  // 第三方只拿到目录时靠它才知道该找谁（research/18 §2.2）。
+  async function writeStartupHeader(): Promise<StartupHeader | null> {
     try {
       const dir = typeof getCacheDir === 'function' ? await getCacheDir() : null
       const pid = currentPid()
-      headerInfo = { pid: pid, startedAt: storeStartedAt, dir: (dir as string) || defaultCwd || '' }
-      log('info', 'host.start', { pid: headerInfo.pid, startedAt: headerInfo.startedAt, dir: headerInfo.dir })
+      let osName = ''
+      try {
+        const platform = typeof getPlatform === 'function' ? await getPlatform() : null
+        if (platform && typeof platform.os === 'string') osName = platform.os
+      } catch (e2) {
+        void e2
+      }
+      headerInfo = {
+        pid: pid,
+        startedAt: storeStartedAt,
+        dir: (dir as string) || defaultCwd || '',
+        pluginVersion: config.pluginVersion,
+        os: osName
+      }
+      // 空值不进行：行里出现的每个键都是「真记下来的事实」，而不是占位。
+      const fields: Record<string, unknown> = { pid: headerInfo.pid, startedAt: headerInfo.startedAt, dir: headerInfo.dir }
+      if (headerInfo.pluginVersion !== '') fields['pluginVersion'] = headerInfo.pluginVersion
+      if (headerInfo.os !== '') fields['os'] = headerInfo.os
+      log('info', 'host.start', fields)
     } catch (e) {
       void e
     }
     return headerInfo
   }
-  function getHeaderInfo(): { pid: number; startedAt: string; dir: string } | null {
+  function getHeaderInfo(): StartupHeader | null {
     return headerInfo
   }
   // 电话组：导出/清空/开关三组电话体在 ./phones.js，此处只留调用（包内静态引入）。
@@ -425,6 +448,16 @@ export function createLogStore(deps: LogStoreDeps, configInput?: HostLogConfigIn
   // 好让宿主入口（host.registerHostLogPhones）能注册第 6 个电话名（本电话只读，不落盘、不触发轮转/清理）。
   async function handleLogQuery(args?: unknown) {
     return phones.handleLogQuery(args as Parameters<typeof phones.handleLogQuery>[0])
+  }
+  // 宿主侧链上下文（0.4.0，research/18 §1）：低层 store.log 一行不改，链由显式上下文声明。
+  // 用 `const t = store.trace({ traceId? })` 起一条链，`t.log(level, event, fields)` 自动带
+  // traceId/spanId/seq，`t.child()` 走下一步；没声明上下文时 fields 仍然原样透传（既有行为）。
+  function trace(input?: { traceId?: string; spanId?: string }) {
+    return createHostTrace({
+      emit: (level: string, event: string, fields: Record<string, unknown>) => log(level, event, fields),
+      traceId: input?.traceId,
+      spanId: input?.spanId
+    })
   }
   // 命名空间化挂 store 上：synced/beforeExit 仅经 store 返回对象可达，不污染全局；synced.beforeExit 与 store.beforeExit 同体。
   try {
@@ -474,6 +507,7 @@ export function createLogStore(deps: LogStoreDeps, configInput?: HostLogConfigIn
     config: config,
     isEnabled: isEnabled,
     log: log,
+    trace: trace,
     flush: flush,
     flushNow: flushNow,
     synced: synced,

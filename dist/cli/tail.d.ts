@@ -17,7 +17,7 @@ export declare function colorEnabled(options: CliOptions, isTty: boolean | undef
 export declare function matches(row: ParsedLogRow, options: CliOptions, nowMs: number): boolean;
 /** 一行的输出文本：`--json` 给原始行（管道给 jq 用），否则给人话。 */
 export declare function outputOf(line: string, options: CliOptions, useColor: boolean): string | null;
-/** 认目录：给日志目录就用它；给根目录就往下看一层（logs-*）；再不行列为「没找到」。 */
+/** 认目录：给日志目录就用它；给根目录就往下看一层；再不行列为「没找到」。 */
 export declare function discoverLogDirs(paths: readonly string[]): Promise<{
     dirs: LogDir[];
     missing: string[];

@@ -107,7 +107,8 @@ describe('常驻事件放行口径：清单声明 resident 真生效，未声明
       assert.equal(log.store.log('info', 'res.declared', { n: 1 }), 'skipped')
       assert.equal(log.store.log('info', 'gh.exec', { n: 2 }), 'queued')
       await log.ready
-      const events = (await readRows(cacheDir, 'logs-res-b')).map((r) => r.event)
+      // host.start 是入口自动写的目录自述行（常驻），不参与「哪些事件被放行」的口径判定。
+      const events = (await readRows(cacheDir, 'logs-res-b')).map((r) => r.event).filter((e) => e !== 'host.start')
       assert.deepEqual(events, ['gh.exec'])
       log.store.release()
     } finally {
@@ -126,7 +127,10 @@ describe('常驻事件放行口径：清单声明 resident 真生效，未声明
       assert.equal(log.store.log('info', 'res.declared', {}), 'skipped')
       assert.equal(log.store.log('info', 'gh.exec', {}), 'queued')
       await log.ready
-      assert.deepEqual((await readRows(cacheDir, 'logs-res-c')).map((r) => r.event), ['gh.exec'])
+      assert.deepEqual(
+        (await readRows(cacheDir, 'logs-res-c')).map((r) => r.event).filter((e) => e !== 'host.start'),
+        ['gh.exec']
+      )
       log.store.release()
     } finally {
       await rm(cacheDir, { recursive: true, force: true })

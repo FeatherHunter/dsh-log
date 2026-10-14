@@ -2,6 +2,7 @@
 // 以后谁改它：改电话入参/回参形状的人。
 import type { ResolvedHostLogConfig } from '../config.js'
 import type { LogFileService, LogPlatform } from '../platform/ports.js'
+import type { StartupHeader } from '../core/startup-header.js'
 
 export interface LogQueryTimeRange {
   start?: unknown
@@ -53,7 +54,7 @@ export interface LogPhonesContext {
   writeTarget: (target: unknown, text: string) => Promise<unknown>
   log: (level: string, event: string, fields: Record<string, unknown>) => void
   getSwitchState: () => { enabled: boolean }
-  getHeaderInfo: () => { pid: number; startedAt: string; dir: string } | null
+  getHeaderInfo: () => StartupHeader | null
   loadSwitch: () => Promise<{ enabled: boolean }>
   setSwitch: (enabled: boolean) => Promise<{ enabled: boolean }>
   getPid?: () => number

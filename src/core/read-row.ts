@@ -47,7 +47,8 @@ function pad2(n: number): string {
 
 // 本地时区、固定宽度。故意不用 toLocaleString/Intl：不同 ICU 版本的输出不一样，
 // 同一份日志在两台机器上会渲染成不同字符串，测试与对账都会飘。
-function formatLocalTime(ts: number): string {
+// 导出给目录摘要用（同一份时间格式，别处不许再写第二份）。
+export function formatLocalTime(ts: number): string {
   const d = new Date(ts)
   if (Number.isNaN(d.getTime())) return String(ts)
   return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ` +

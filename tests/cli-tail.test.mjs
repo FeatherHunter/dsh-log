@@ -99,6 +99,20 @@ describe('读侧命令行（C）：dsh-log tail', () => {
     assert.ok(!bareSub.stderr.includes('没找到日志目录：tail'), `tail 不该被当成目录名，实际：${bareSub.stderr}`)
   })
 
+  test('认目录的契约：目录名不带 logs- 前缀也认得出来（名字不是判据，里面有没有日志文件才是）', () => {
+    // 上游对齐时定的契约（见 src/cli/tail.ts 的 discoverLogDirs 注释）：目录名是使用者的自由。
+    const nsDir = join(root, 'my-namespace')
+    mkdirSync(nsDir, { recursive: true })
+    writeFileSync(join(nsDir, '2026-10-15.log'), JSON.stringify(ROWS.fresh) + '\n', 'utf8')
+    const res = run(['tail', nsDir])
+    assert.equal(res.status, 0, res.stderr)
+    assert.ok(res.stdout.includes('new.event'), `无前缀目录必须能看，实际：${res.stdout}`)
+    // 从根目录发现时也认它（往下看一层）。
+    const fromRoot = run(['tail', root])
+    assert.equal(fromRoot.status, 0, fromRoot.stderr)
+    assert.ok(fromRoot.stdout.includes('new.event'), '根目录发现也要包含无前缀子目录')
+  })
+
   test('--json：原样输出（管道给 jq 用），仍是「跳过坏行、跳过半行」', () => {
     const res = run(['tail', logDir, '--json'])
     assert.equal(res.status, 0, res.stderr)

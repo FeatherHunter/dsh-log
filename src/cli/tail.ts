@@ -80,7 +80,14 @@ async function filesInDir(dir: string): Promise<LogFileInfo[]> {
   return merged
 }
 
-/** 认目录：给日志目录就用它；给根目录就往下看一层（logs-*）；再不行列为「没找到」。 */
+// 认目录的**契约**（2026-10-15 与上游对齐时定下，写进文档前先写进这里）：
+//   ① 给「日志目录」本身 → 直接用（里面有没有日志文件由 filesInDir 判）；
+//   ② 给「日志根目录」→ 往下看**一层**子目录，挑出里面有日志文件的那些；
+//   ③ 目录名**不要求**带 `logs-` 前缀——目录名是使用者的自由（`my-namespace/2026-10-15.log`
+//      照样认得出来），发现逻辑只认「里面有没有日志文件」，不认名字像不像本包的派生形状；
+//   ④ 两条都不成立才算「没找到」（调用方据此报错并退出码 1）。
+// 回归线：tests/cli-tail.test.mjs 与 tests/cli-export.test.mjs 各有一条无前缀目录的用例钉着。
+/** 认目录：给日志目录就用它；给根目录就往下看一层；再不行列为「没找到」。 */
 export async function discoverLogDirs(paths: readonly string[]): Promise<{ dirs: LogDir[]; missing: string[] }> {
   const dirs: LogDir[] = []
   const missing: string[] = []

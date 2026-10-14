@@ -7,6 +7,7 @@
 // 以及——最重要的一条——**这个工具不参与写盘**：装它、用它、卸它，都不改变任何一行已发生的日志。
 import { parseArgs, USAGE } from './cli/args.js';
 import { colorEnabled, discoverLogDirs, runFollow, runOnce } from './cli/tail.js';
+import { runExport } from './cli/export.js';
 import { packageVersionNear } from './platform/read-node.js';
 export async function main(argv) {
     const parsed = parseArgs(argv);
@@ -36,6 +37,8 @@ export async function main(argv) {
         process.stderr.write('dsh-log: 一个日志目录都没找到（目录里应该有 YYYY-MM-DD.log，或它的子目录里有）\n');
         return 1;
     }
+    if (options.command === 'export')
+        return await runExport(dirs, options);
     const useColor = colorEnabled(options, process.stdout.isTTY);
     return options.follow ? await runFollow(paths, dirs, options, useColor) : await runOnce(dirs, options, useColor);
 }

@@ -115,7 +115,9 @@ export function createLogFileHandlers(ctx) {
                 void e3;
             }
             const summary = {
-                pluginVersion: 'unknown',
+                // 版本只认真记下来的：启动头里记了就用它，没记就 unknown——
+                // 拿「读日志那个进程」的版本顶替就是写错事实（research/18 §2.2）。
+                pluginVersion: (headerInfo && headerInfo.pluginVersion) || 'unknown',
                 os: osName,
                 cwd: cwdNow,
                 logSwitch: ctx.getSwitchState(),

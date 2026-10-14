@@ -2,6 +2,7 @@ import type { FileNamePolicy } from '../core/file-name.js';
 export interface HostLogConfigInput {
     pluginId: string;
     prefix: string;
+    pluginVersion?: string;
     logDirName?: string;
     switchFileName?: string;
     fileNamePolicy?: FileNamePolicy;
@@ -13,6 +14,7 @@ export interface HostLogConfigInput {
 export interface ResolvedHostLogConfig {
     pluginId: string;
     prefix: string;
+    pluginVersion: string;
     logDirName: string;
     switchFileName: string;
     fileNamePolicy: FileNamePolicy;
