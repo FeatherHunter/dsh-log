@@ -1,7 +1,7 @@
 {
   "name": "dsh-log",
-  "version": "0.3.1",
-  "description": "可复用的日志系统：宿主落盘引擎（0.3.0：默认 1 行可用、存时硬隔离查时授权聚合、五键行、error 永不丢；不兼容 0.2.x）",
+  "version": "0.4.0",
+  "description": "可复用的日志系统：宿主落盘引擎 + 读侧工具（五键行、存时硬隔离查时授权聚合、error 永不丢；0.4.0 起带 formatRow 与人话命令行 dsh-log tail）",
   "license": "MIT",
   "author": "王辰浩",
   "repository": {
@@ -13,6 +13,9 @@
   },
   "type": "module",
   "types": "./dist/index.d.ts",
+  "bin": {
+    "dsh-log": "./dist/cli.js"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",

@@ -71,11 +71,28 @@ describe('发行面（#27）：类型与入口', () => {
     assert.ok(Array.isArray(pkg.files) && pkg.files.includes('dist'), 'files 必须包含 dist')
   })
 
+  it('bin 指向真实文件、第一行是 shebang，且在打包范围内（否则 npx dsh-log 装出来不能执行）', () => {
+    assert.ok(pkg.bin && typeof pkg.bin['dsh-log'] === 'string', 'package.json 该有 bin.dsh-log')
+    const rel = pkg.bin['dsh-log']
+    const binPath = path.join(PKG_DIR, rel)
+    assert.ok(existsSync(binPath), 'bin 指向的文件不存在：' + rel)
+    assert.equal(
+      readFileSync(binPath, 'utf8').split('\n')[0],
+      '#!/usr/bin/env node',
+      'bin 的第一行必须是 shebang（由 build.mjs 在包头之前补回）'
+    )
+    assert.ok(rel.replace(/^\.\//, '').startsWith('dist/'), 'bin 必须落在 files 覆盖的 dist/ 里')
+  })
+
   it('根入口可用：dsh-log 与 dsh-log/node 都能按包名导入（自引用解析）', async () => {
     const root = await import('dsh-log')
     assert.equal(typeof root.parseLogFileName, 'function')
     assert.equal(typeof root.lintEventFields, 'function')
     assert.equal(root.LOG_FORMAT_VERSION, 3)
+    // 读侧三件（0.4.0）：纯函数，浏览器与 Node 都能用
+    assert.equal(typeof root.parseLogLine, 'function')
+    assert.equal(typeof root.formatRow, 'function')
+    assert.equal(typeof root.formatRows, 'function')
     const nodeEntry = await import('dsh-log/node')
     assert.equal(typeof nodeEntry.createQuickLog, 'function')
     const hostEntry = await import('dsh-log/host')

@@ -27,3 +27,7 @@ PHONE_ACTIONS, LOG_QUERY_ACTION_SUFFIX, buildPhoneName, buildPhoneNames, buildLo
 parseLogFileName, listLogFiles, logFilesOfDate, matchExportFileName, formatDailyFileName, formatFourSegmentFileName, resolveLogFileName, 
 // 事件清单：验形、字段检查、计数
 parseEventListManifest, checkEventFields, lintEventFields, computeEventCounts } from './config.js';
+// 读侧（0.4.0）：把落盘的那一行 JSON 变回人话 —— 与写侧**对称**的公共面。
+// 为什么放在根入口：它是纯函数（零 IO、零环境依赖），浏览器与 Node 都能用；
+// 而为什么它是函数而不是格式：人话随读者变（时区/语言/详略），写进文件就是把一种偏好固化给所有人。
+export { parseLogLine, formatRow, formatRows } from './core/read-row.js';

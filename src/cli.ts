@@ -1,0 +1,53 @@
+#!/usr/bin/env node
+// src/cli.ts —— 读侧命令行的入口：把 argv 交给纯解析器与读侧主体，然后落退出码。
+//
+// 这里刻意只有「装配」：解析（cli/args.ts，纯函数）、读与渲染（cli/tail.ts）、
+// 文件能力（platform/read-node.ts）。入口不写业务，于是所有行为都能在单测里被喂假数据验证，
+// 以及——最重要的一条——**这个工具不参与写盘**：装它、用它、卸它，都不改变任何一行已发生的日志。
+
+import { parseArgs, USAGE } from './cli/args.js'
+import { colorEnabled, discoverLogDirs, runFollow, runOnce } from './cli/tail.js'
+import { packageVersionNear } from './platform/read-node.js'
+
+export async function main(argv: readonly string[]): Promise<number> {
+  const parsed = parseArgs(argv)
+  const options = parsed.options
+  if (parsed.error) {
+    process.stderr.write(`dsh-log: ${parsed.error}\n\n${USAGE}\n`)
+    return 1
+  }
+  if (options.help) {
+    process.stdout.write(USAGE + '\n')
+    return 0
+  }
+  if (options.version) {
+    const version = await packageVersionNear(import.meta.url)
+    if (version === null) {
+      process.stderr.write('dsh-log: 读不到 package.json 里的版本号\n')
+      return 2
+    }
+    process.stdout.write(version + '\n')
+    return 0
+  }
+
+  const paths = options.paths.length > 0 ? options.paths : ['.']
+  const { dirs, missing } = await discoverLogDirs(paths)
+  for (const path of missing) process.stderr.write(`dsh-log: 没找到日志目录：${path}\n`)
+  if (dirs.length === 0) {
+    process.stderr.write('dsh-log: 一个日志目录都没找到（目录里应该有 YYYY-MM-DD.log，或它的子目录里有）\n')
+    return 1
+  }
+
+  const useColor = colorEnabled(options, process.stdout.isTTY)
+  return options.follow ? await runFollow(paths, dirs, options, useColor) : await runOnce(dirs, options, useColor)
+}
+
+main(process.argv.slice(2))
+  .then((code) => {
+    process.exitCode = code
+  })
+  .catch((error: unknown) => {
+    const message = error instanceof Error ? error.message : String(error)
+    process.stderr.write(`dsh-log: 未预期异常：${message}\n`)
+    process.exitCode = 2
+  })

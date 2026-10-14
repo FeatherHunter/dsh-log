@@ -20,7 +20,7 @@
 ## 目录
 
 - **上手**：先跑起来（30 秒）· 0. 我该读哪儿 · 0.1 常见任务配方 · 0.2 故障排查
-- **接口**：1. 安装 · 2. 入口 · 2.1 独立 Node 程序 · 2.2 公开面速查 · 3. 三步接入（宿主）· 4. 配置默认值 · 5. 电话名与客户端 · 5.3 追踪链路
+- **接口**：1. 安装 · 2. 入口 · 2.1 独立 Node 程序 · 2.2 公开面速查 · 3. 三步接入（宿主）· 3.1 真实输出 · 3.2 怎么看日志 · 4. 配置默认值 · 5. 电话名与客户端 · 5.3 追踪链路
 - **语义**：6. 失败语义 · 6.1 轮转与保留 · 7. 事件清单与检查器 · 8. 已知事项
 - **维护**：9. build 与门禁 · 9.1 源码分层 · 10. 版本策略 · 11. 安全与许可 · 12. 0.3.0 迁移 7 步
 
@@ -271,9 +271,9 @@ const report = await log.ready   // 读一次刷一次；report.ok 为真才代�
 
 ## 2.2 公开面速查（四个入口的导出名）
 
-这份名单由 `tests/public-surface.test.mjs` **逐字钉住**（数量：根 32 / 宿主 23 / 客户端 17 / Node 4）；要改公开面就得同时改那份测试与本节。跨入口同名的必须是同一个引用（同源转出口，不许各自实现）。
+这份名单由 `tests/public-surface.test.mjs` **逐字钉住**（数量：根 35 / 宿主 23 / 客户端 17 / Node 4）；要改公开面就得同时改那份测试与本节。跨入口同名的必须是同一个引用（同源转出口，不许各自实现）。
 
-- **根 `dsh-log`（32）**：常量 `LOG_FORMAT_VERSION`、`EVENT_LEVELS`、`EVENT_KINDS`、`LOG_DEBOUNCE_MS`、`DEFAULT_MAX_QUEUE`/`DEFAULT_MAX_SIZE`/`DEFAULT_MAX_DAYS`、`CLIENT_BATCH_MAX`/`CLIENT_BATCH_INTERVAL_MS`/`CLIENT_PACKET_BYTES`/`CLIENT_QUEUE_MAX`、`LEGACY_LOG_DIR_NAME`/`LEGACY_SWITCH_FILE_NAME`；配置 `assertPluginId`、`resolveHostLogConfig`、`resolveClientLogConfig`、`PHONE_ACTIONS`；电话名 `buildPhoneName`、`buildPhoneNames`、`buildLogQueryPhoneName`、`LOG_QUERY_ACTION_SUFFIX`；文件名 `parseLogFileName`、`listLogFiles`、`logFilesOfDate`、`matchExportFileName`、`formatDailyFileName`、`formatFourSegmentFileName`、`resolveLogFileName`；清单 `parseEventListManifest`、`checkEventFields`、`lintEventFields`、`computeEventCounts`。
+- **根 `dsh-log`（35）**：常量 `LOG_FORMAT_VERSION`、`EVENT_LEVELS`、`EVENT_KINDS`、`LOG_DEBOUNCE_MS`、`DEFAULT_MAX_QUEUE`/`DEFAULT_MAX_SIZE`/`DEFAULT_MAX_DAYS`、`CLIENT_BATCH_MAX`/`CLIENT_BATCH_INTERVAL_MS`/`CLIENT_PACKET_BYTES`/`CLIENT_QUEUE_MAX`、`LEGACY_LOG_DIR_NAME`/`LEGACY_SWITCH_FILE_NAME`；配置 `assertPluginId`、`resolveHostLogConfig`、`resolveClientLogConfig`、`PHONE_ACTIONS`；电话名 `buildPhoneName`、`buildPhoneNames`、`buildLogQueryPhoneName`、`LOG_QUERY_ACTION_SUFFIX`；文件名 `parseLogFileName`、`listLogFiles`、`logFilesOfDate`、`matchExportFileName`、`formatDailyFileName`、`formatFourSegmentFileName`、`resolveLogFileName`；清单 `parseEventListManifest`、`checkEventFields`、`lintEventFields`、`computeEventCounts`；读侧 `parseLogLine`、`formatRow`、`formatRows`（把落盘的一行变回人话，见第 3.2 节）。
 - **宿主 `dsh-log/host`（23）**：建库 `createLogStore`、`createHostLog`；注册 `registerHostLogPhones`、`HOST_LOG_PHONE_ACTIONS`、`LOG_DIR_NAME`、`LOG_SWITCH_FILE`、`formatLogFileName`；跨插件聚合 `aggregateLogQuery`；其余（`LOG_FORMAT_VERSION`、`LOG_DEBOUNCE_MS`、`LOG_QUERY_ACTION_SUFFIX`、`buildPhoneName(s)`、`buildLogQueryPhoneName`、`resolveHostLogConfig`、`parseLogFileName`、`listLogFiles`、`logFilesOfDate`、`formatDailyFileName`、`parseEventListManifest`、`checkEventFields`、`lintEventFields`、`computeEventCounts`）是与根入口**同源**的转出口。
 - **客户端 `dsh-log/client`（17）**：建日志器 `createClientLog`；批量口径 `CLIENT_BATCH`、`LOG_BATCH_MAX`、`LOG_PACKET_BYTES`、`LOG_QUEUE_MAX`、`LOG_FLUSH_MS`、`LOG_WATCHDOG_MS`、`LOG_LEVELS`、`LOG_REV`、`LOG_DEBUG_KEY`、`debugStorageKey`；电话名 `buildClientPhoneNames`、`buildPhoneName(s)`、`buildLogQueryPhoneName`、`LOG_QUERY_ACTION_SUFFIX`、`resolveClientLogConfig`（其中电话名与配置部分与根入口同源）。
 - **Node `dsh-log/node`（4）**：`createQuickLog(cacheDir, pluginId?)`（最省事：文件服务、计时器都不用给——但 `cacheDir` **仍必填**，本入口不猜日志写到哪）、`createNodeHostLog({ cacheDir , fs? , timer? , joinPath? }, config)`（同样自带文件服务与计时器，只是配置要按宿主那套显式给 `pluginId`/`prefix`）、`createNodeFileService`、`createNodeTimer`（后两个可以当宿主入口的 `fs`/`timer` 用）。
@@ -383,6 +383,46 @@ audit.json          354 字节   ← 逐次记账（不是日志行，读侧不�
 | `log.trace.shadow`（warn） | 保留字冲突；主行里 `fields._shadow` 是调用方原本的值 |
 | `fields._shadow` | 被搬走的保留字（库不丢你的数据，只是不让它占库自己的键） |
 | `v` | 行格式版本，0.3.0 恒为 `3`；读侧遇到 `v != 3` 跳过并计入 `skipped` |
+
+## 3.2 怎么看日志（读侧工具）
+
+**人话怎么写**：`event` 用稳定代码名（可 grep、可计数、可聚合），人话放进 `fields.message`。运行期不对字段做任何裁剪（白名单只在离线检查器里，见第 7 节）：
+
+```ts
+log.error('net.unreachable', { message: '网络异常：连接 api.example.com 超时 3s', host: 'api.example.com', attempt: 2 })
+```
+
+落盘仍是五键一行：
+
+```json
+{"v":3,"ts":1791971707831,"level":"error","event":"net.unreachable","fields":{"message":"网络异常：连接 api.example.com 超时 3s","host":"api.example.com","attempt":2}}
+```
+
+为什么人话不进存储格式：机器读的那份是唯一真源，人话在**读**的那一刻算——它随读者变（时区、语言、要不要看字段），写死进文件等于把一种读者的偏好固化给所有人，还要为它多付字节。清单里没登记的字段只会让离线检查器**黄灯**（`lintEventFields` 的 `severity: 'warn'`），运行期照落不误。
+
+**库这边渲染**（`parseLogLine` / `formatRow` / `formatRows` 从根入口导出，纯函数、零 IO，浏览器与 Node 都能用）：
+
+```ts
+import { formatRow, parseLogLine, formatRows } from 'dsh-log'
+
+const rows = content.split('\n').map(parseLogLine).filter(Boolean)      // 坏行与半行自动是 null
+for (const row of rows) console.log(formatRow(row))                    // 2026-10-14 17:55:07 ERROR net.unreachable  网络异常：…  (host=api.example.com, attempt=2)
+console.log(formatRows(rows, { color: true, withFields: false }).join('\n'))  // 只要人话、级别上色
+```
+
+`formatRow` 选项：`timeStyle`（`'local'` 默认 / `'iso'`）、`messageField`（默认 `message`）、`withFields: false`（只要人话）、`color: true`（级别上色，默认关）、`eventWidth`（事件名对齐宽度，默认 22）、`maxValueChars`（单个字段值上限，默认 200，超出截断加 `…`）。
+
+**终端这边看**（`dsh-log tail`，装包即带的命令；**只读**——不写、不改、不删任何文件，也不写缓存与状态）：
+
+```bash
+npx dsh-log tail ./logs-my-plugin                   # 看最后 200 行（人话）
+npx dsh-log tail ./logs-my-plugin -f                # 跟着看：先给最后 20 行，然后等新行
+npx dsh-log tail ./logs --since 1h --level error    # 近一小时的所有 error
+npx dsh-log tail ./logs --trace 80670256ab1237b7    # 按 traceId 追一次请求的整条链
+npx dsh-log tail ./logs --json | jq 'select(.level=="error") | .event'
+```
+
+目录给插件的日志目录（里面是 `YYYY-MM-DD.log`）或日志根目录（里面是 `logs-<pluginId>/`）都认；封存件按写入先后排在可写文件之前；半行与解析不了的行一律跳过。
 
 ## 4. 配置默认值派生（#558 冻结）
 
@@ -541,12 +581,12 @@ node build.mjs
 npm publish --dry-run
 ```
 
-`node build.mjs` 先跑 `tsc --noEmit` 类型检查，把 `src` 下 44 个可转译 TS（含子目录，按目录结构一对一转译；不含 `node-ambient.d.ts` 这类声明文件）写进 `dist`（转译优先用 esbuild，没装 esbuild 时自动回退 TypeScript 自带转译器），最后再用 `tsconfig.build.json` 产出与 `src` 同形的 `dist/**/*.d.ts`——**声明由 tsc 出，不由转译器猜**（缺一个声明，构建就报错退出）。发布白名单（`files`）打进 93 个文件：`dist` 下 44 个 JS + 44 个 `.d.ts`、`event-list.template.json`、`INTEGRATION.md`、`README.md`、`LICENSE`、`package.json`（`npm publish --dry-run` 可自查：文件数与体积以**当次**输出为准——它们随打包时刻变化，本文件不抄具体值）。加新文件进包时同步改 `files` 并重跑 dry-run 确认文件数；改了 `src` 必须重跑 build——本仓当前把 `dist` 一并提交，只改 `src` 不生成产物会留下过期实现。
+`node build.mjs` 先跑 `tsc --noEmit` 类型检查，把 `src` 下 49 个可转译 TS（含子目录，按目录结构一对一转译；不含 `node-ambient.d.ts` 这类声明文件）写进 `dist`（转译优先用 esbuild，没装 esbuild 时自动回退 TypeScript 自带转译器；可执行入口的 shebang 会被补回**第一行**，否则 `npx dsh-log` 装出来不能执行），最后再用 `tsconfig.build.json` 产出与 `src` 同形的 `dist/**/*.d.ts`——**声明由 tsc 出，不由转译器猜**（缺一个声明，构建就报错退出）。发布白名单（`files`）打进 103 个文件：`dist` 下 49 个 JS + 49 个 `.d.ts`、`event-list.template.json`、`INTEGRATION.md`、`README.md`、`LICENSE`、`package.json`（`npm publish --dry-run` 可自查：文件数与体积以**当次**输出为准——它们随打包时刻变化，本文件不抄具体值）。加新文件进包时同步改 `files` 并重跑 dry-run 确认文件数；改了 `src` 必须重跑 build——本仓当前把 `dist` 一并提交，只改 `src` 不生成产物会留下过期实现。
 
 门禁跑法（改包后全跑，退出码全 0 才算过）：
 
 ```sh
-npm test                              # = node --test "tests/*.test.mjs"：宿主、客户端、事件清单、Node 入口、全栈隔离、轮转与保留、常驻级别（清单声明放行）、运行时行为（T7）、快照门禁、查询分页（#20）、追踪链路（#24）、端到端真机链路、接缝不变式（#25）、硬杀耐久（#23）、追加写、发行面（#27）、消费方类型编译（#27）、公开面快照、架构门禁（分层与环）——共十九个测试文件、node 自报 19 套
+npm test                              # = node --test "tests/*.test.mjs"：宿主、客户端、事件清单、Node 入口、全栈隔离、轮转与保留、常驻级别（清单声明放行）、运行时行为（T7）、快照门禁、查询分页（#20）、追踪链路（#24）、端到端真机链路、接缝不变式（#25）、硬杀耐久（#23）、追加写、读侧渲染、读侧命令行、发行面（#27）、消费方类型编译（#27）、公开面快照、架构门禁（分层与环）——共二十一个测试文件、node 自报 21 套
 node --test tests/snapshot.test.mjs   # 单跑快照确认制门禁
 node tests/update-snapshots.mjs       # 清单新增字段后：先把黄转绿再提交（这是更新快照，不是判绿）
 node scripts/pack-smoke.mjs           # 打包冒烟：真打包 + 真装进全新工程 + 真写一行（发行面一层）
@@ -556,14 +596,14 @@ CI 已把上面这些固化成**两条作业**（`.github/workflows/ci.yml`）�
 
 快照门禁只有黄/红两档（#18 Q6）：黄 warn——清单新增字段但快照未更新（`tests/snapshot.test.mjs` 只警告不判红，跑 `node tests/update-snapshots.mjs` 一键更新即转绿，不阻排障）；红 error——未知事件名、envelope 非法（落盘行五键 `{v,ts,level,event,fields}` 中 `v` 不为 3 或形状不对）、事件总数突变（与 `tests/event-snapshots/_baseline.json` 比 ±超 5 且 `tests/event-snapshots/CHANGELOG.md` 无说明；红的是“无 changelog”不是字段本身，补说明后跑更新命令即转绿）。事件条数就记在 `tests/event-snapshots/` 这套快照里，别在文档里抄数字。
 
-`npm test` 的用例清单来自 `package.json` 的 `test` 脚本（上面那十九个文件、共 **180 例**；`pretest` 会先跑 `node build.mjs`，所以测试一定在最新产物上跑）。类型检查：`npm run typecheck`（脚本内已直调 `node node_modules/typescript/bin/tsc`，绕开仓库里那个指向失效路径的 `.bin/tsc` 垫片）。发行面那两套（`release-surface`、`consumer-types`）会把包按 junction 装进临时工程、用真 tsc 编译一次，所以「类型能不能被消费者用上」是门禁里跑出来的结论，不是文档里的承诺。
+`npm test` 的用例清单来自 `package.json` 的 `test` 脚本（上面那二十一个文件、共 **197 例**；`pretest` 会先跑 `node build.mjs`，所以测试一定在最新产物上跑）。类型检查：`npm run typecheck`（脚本内已直调 `node node_modules/typescript/bin/tsc`，绕开仓库里那个指向失效路径的 `.bin/tsc` 垫片）。发行面那两套（`release-surface`、`consumer-types`）会把包按 junction 装进临时工程、用真 tsc 编译一次，所以「类型能不能被消费者用上」是门禁里跑出来的结论，不是文档里的承诺。
 
 ### 9.1 源码分层（贡献者视角）
 
 `src` 按「依赖只许向右」分成五层（`tests/arch.test.mjs` 的 `layerOf()` 就是这五档，违反即红，不是文档约定）：
 
 ```
-入口层    index.ts（根入口）· node.ts（Node 入口）· host.ts（宿主入口）
+入口层    index.ts（根入口）· node.ts（Node 入口）· host.ts（宿主入口）· cli.ts（命令行入口，带 shebang）
    ↓
 面与引擎  store.ts · phones.ts · client.ts          ← 组合根：只做装配与接线
           engine/  pipeline（行流水线：准入/队列/刷盘/重试）· dir-lease（目录租约）·
@@ -571,12 +611,14 @@ CI 已把上面这些固化成**两条作业**（`.github/workflows/ci.yml`）�
           host/    query（只读查询电话）· files（导出/清空）· aggregate（查时授权聚合）· context · types
           client/  write（主写路径）· send（取批/裁剪/重试位）· switch-ops · switch-cache ·
                    trace（追踪三件套）· forward（丢弃汇总）· transport · types
+          cli/     args（命令行参数解析）· tail（按写序读、渲染、跟读）
    ↓
 配置面    config.ts（门面，只 re-export）+ config/  validate · constants · phones · log-names · resolve · event-list
    ↓
-平台层    platform/  ports（端口形状）· fs-node · timer-node · later
+平台层    platform/  ports（端口形状）· fs-node · timer-node · read-node（只读文件能力）· later
    ↓
-领域层    core/  file-name（文件名解析单源）· level（级别语义单源）· row · retention · admission · trace · ids · outcome
+领域层    core/  file-name（文件名解析单源）· level（级别语义单源）· row · retention · admission · trace ·
+                 ids · outcome · read-row（把一行变回人话：纯函数、零 IO）
           ← 零 IO、零上层：换平台、纯函数单测、以及「哪些级别永不丢」这类判定都靠这一层
 ```
 
@@ -589,7 +631,7 @@ CI 已把上面这些固化成**两条作业**（`.github/workflows/ci.yml`）�
 - **一个概念一个词**：宿主侧的「自监控行」与客户端的「诊断行」在代码里都叫 `isDiagnostic`；事件清单里那个**公开数据值**仍叫 `kind: 'selfmon'`（改它会破坏 0.3.0 用户已写好的清单文件），两者说的是同一件事。
 - **不许有第二个真源**：文件名解析、级别语义（哪些级别永不丢）、腾位选行、保留字搬迁、常驻事件集合，各只有一份实现；`tests/arch.test.mjs` 的分层断言 + 上面的树是判据。
 
-门禁规矩（逐条与 `tests/arch.test.mjs` 的断言一致）：`core/` 只引 core 内部；`platform/` 只引 `node:` 内置、core 与 platform 内部；配置面只引 core 与配置面内部**且内部无环**；面与引擎不许引入口层；`node:` 内置的**白名单只有三个文件**——`platform/fs-node.ts`、`platform/timer-node.ts`、`node.ts`（入口层的 `index.ts`、`host.ts` 与组合根都不许碰 `node:`，IO 一律走 platform 端口）；`engine/`、`client/`、`host/` 三个面**互不认识**、也不反向引用组合根（跨面组合只发生在组合根与入口——否则同一份语义会在两个面里各长一份）；全包零运行时依赖、不许 `require`。另一条守卫是 `tests/public-surface.test.mjs`——四个入口的导出名集合快照，搬代码时护着公开面不漂移（要改公开面就得同时改名单与文档）。
+门禁规矩（逐条与 `tests/arch.test.mjs` 的断言一致）：`core/` 只引 core 内部；`platform/` 只引 `node:` 内置、core 与 platform 内部；配置面只引 core 与配置面内部**且内部无环**；面与引擎不许引入口层；`node:` 内置的**白名单只有四个文件**——`platform/fs-node.ts`、`platform/timer-node.ts`、`platform/read-node.ts`、`node.ts`（入口层的 `index.ts`、`host.ts`、`cli.ts` 与组合根都不许碰 `node:`，IO 一律走 platform 端口——读侧工具因此**从结构上就不具备写文件的能力**）；`engine/`、`client/`、`host/` 三个面**互不认识**、也不反向引用组合根（跨面组合只发生在组合根与入口——否则同一份语义会在两个面里各长一份）；全包零运行时依赖、不许 `require`。另一条守卫是 `tests/public-surface.test.mjs`——四个入口的导出名集合快照，搬代码时护着公开面不漂移（要改公开面就得同时改名单与文档）。
 
 官方源最新是 **0.3.0**（2026-10-14 发布，`npm view dsh-log version` 自查；此前公开版本为 0.2.x）。0.3.0 这一次的原始输出、四项发布后核对与已知边界都记在包根的 `notes-publish-drill.md`（不随包发布）。再发新版本时，除了上面两步，还要按第 10 节的版本策略定版本号、把实际发布输出记进那份记录，或用包目录下的发布向导脚本 `publish-wizard.sh` 走一遍完整流程（体检、登录、升版本、干跑、发布、发布后验证六段）。发布后有一件事向导不代做、但必须自己做：核对包内 `README.md` 与 `INTEGRATION.md` 跟仓库一致——发出去的是发布那一刻的文档，仓库里改的不会自动跟上。本仓当前没有 `.npmrc`，也**不要**往仓库里放 token：要么用只含自动化 token 的临时 npmrc（`npm publish --userconfig <临时文件>`），要么临时设 `NODE_AUTH_TOKEN`。
 
@@ -597,7 +639,9 @@ CI 已把上面这些固化成**两条作业**（`.github/workflows/ci.yml`）�
 
 语义化版本。破坏性变更有 5 类：电话改名、增删改入参回参形状、改配置写法、改事件清单字段形状、改文件名策略的默认形状。自首个公开发布起算，日志系统的公共接口连续 3 个版本无破坏性变更之前不议拆。
 
-**0.3.1（2026-10-15）是补丁版**，两类改动、公共接口一个没动：①**客户端丢弃计数口径修正**——库自己写的诊断行（如 `log.forward.summary`）不再计入 `dropped`，与宿主侧同口径（修前 1 行用户日志可能被报成「丢 2 行」）；②**内部命名整改**——`selfMon`→`isDiagnostic`、客户端四个工厂 `create*Rig`→`create*Stage`；顺带修掉第一条汇总行 `windowMs` 报 epoch 量级的问题。
+**0.3.1 是补丁版（未发布）**，两类改动、公共接口一个没动：①**客户端丢弃计数口径修正**——库自己写的诊断行（如 `log.forward.summary`）不再计入 `dropped`，与宿主侧同口径（修前 1 行用户日志可能被报成「丢 2 行」）；②**内部命名整改**——`selfMon`→`isDiagnostic`、客户端四个工厂 `create*Rig`→`create*Stage`；顺带修掉第一条汇总行 `windowMs` 报 epoch 量级的问题。这两项内容已并入下面的 0.4.0（0.3.1 从未发布，不需要也不应该单独发一次）。
+
+**0.4.0（2026-10-15）是加法版本，公共接口只增不改**：①**读侧渲染**——根入口新增 `parseLogLine`／`formatRow`／`formatRows`（把落盘的一行变回人话，纯函数、零 IO，见第 3.2 节）；②**命令行工具**——装包即带 `dsh-log tail`（`bin` 指向 `dist/cli.js`，按写序读、默认渲染人话、`-f` 跟读、`--json` 回机器态；只读，不写不改不删）；③文档新增「真实输出长什么样」与「怎么看日志」两节、事件清单模板补 `message` 示范。升级方式：`npm i dsh-log@0.4.0`，现有代码不需要改；写日志时想给人看，就按第 3.2 节在 `fields.message` 里放一句人话。
 
 ## 11. 安全声明与许可证
 

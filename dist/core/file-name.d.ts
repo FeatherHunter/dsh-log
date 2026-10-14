@@ -33,6 +33,7 @@ export interface LogFileInfo {
 }
 export declare function parseLogFileName(config: FileNameConfig, name: unknown): LogFileInfo | null;
 export declare function logFileDate(config: FileNameConfig, name: unknown): string;
+export declare function logFileWriteOrder(info: LogFileInfo): number;
 export declare function logFilesOfDate(config: FileNameConfig, names: readonly unknown[], date: string): LogFileInfo[];
 export declare function listLogFiles(config: FileNameConfig, names: readonly unknown[]): LogFileInfo[];
 export declare function matchExportFileName(config: FileNameConfig, candidates: string[], wantDate: string, fallbackFileName: string): string;

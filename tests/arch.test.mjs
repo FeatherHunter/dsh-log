@@ -99,7 +99,10 @@ describe('架构门禁：依赖方向只允许向右（core ← platform ← con
   test('扫描到源码文件（不是空跑）', () => {
     assert.ok(FILES.length >= 14, `只扫到 ${FILES.length} 个文件，路径或过滤有问题`)
     assert.ok(FILES.includes('core/level.ts'), 'core/level.ts 应当在扫描结果里')
+    assert.ok(FILES.includes('core/read-row.ts'), 'core/read-row.ts（读侧渲染）应当在扫描结果里')
     assert.ok(FILES.includes('platform/fs-node.ts'), 'platform/fs-node.ts 应当在扫描结果里')
+    assert.ok(FILES.includes('platform/read-node.ts'), 'platform/read-node.ts（读侧文件能力）应当在扫描结果里')
+    assert.ok(FILES.includes('cli/tail.ts'), 'cli/tail.ts（读侧命令行主体）应当在扫描结果里')
     assert.ok(FILES.includes('engine/io.ts'), 'engine/io.ts 应当在扫描结果里')
     assert.ok(FILES.includes('config/constants.ts'), 'config/constants.ts 应当在扫描结果里')
     assert.ok(FILES.includes('config/event-list.ts'), 'config/event-list.ts 应当在扫描结果里')
@@ -227,7 +230,9 @@ describe('架构门禁：依赖方向只允许向右（core ← platform ← con
   })
 
   test('node: 内置只出现在 platform/ 与入口 node.ts', () => {
-    const allowed = new Set(['platform/fs-node.ts', 'platform/timer-node.ts', 'node.ts'])
+    // 读侧 CLI（cli.ts + cli/）刻意不在白名单里：它要读文件，所以文件能力留在 platform/read-node.ts，
+    // CLI 自己一行 node: 都不许碰——这条同时把「工具不许写文件」变成了结构约束（写 API 只能来自 platform）。
+    const allowed = new Set(['platform/fs-node.ts', 'platform/timer-node.ts', 'platform/read-node.ts', 'node.ts'])
     const bad = []
     for (const rel of FILES) {
       const text = readFileSync(join(SRC, rel), 'utf8')

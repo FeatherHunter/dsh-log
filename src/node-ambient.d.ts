@@ -23,8 +23,9 @@ declare module 'node:fs/promises' {
   export function rename(from: string, to: string): Promise<void>
   export function rm(path: string, options?: { recursive?: boolean; force?: boolean }): Promise<void>
   // 文件长度（2026-10-14 对抗审查补）：追加路用它独立核对「刚追加的字节真的在文件里」。
-  // 本包只用到 size，其余 stat 字段不声明——`types: []` 下声明越窄越不会与真 @types/node 冲突。
-  export function stat(path: string): Promise<{ size: number }>
+  // 2026-10-15 读侧工具补 isFile/isDirectory/ino：CLI 要用它区分目录与文件，并靠 ino 认出「rename 后还是同一个文件」。
+  // 本包只用到这几个成员——`types: []` 下声明越窄越不会与真 @types/node 冲突。
+  export function stat(path: string): Promise<{ size: number; ino?: number; isFile(): boolean; isDirectory(): boolean }>
   export function unlink(path: string): Promise<void>
   export function writeFile(path: string, data: string, encoding: string): Promise<void>
 }
@@ -34,5 +35,34 @@ declare module 'node:path' {
   export function dirname(path: string): string
 }
 
+declare module 'node:url' {
+  // 只声明读侧工具用到的那一个：把 import.meta.url 变成文件路径（找 package.json 取版本号）。
+  export function fileURLToPath(url: string | URL): string
+}
+
 // 计时器用运行环境自带的全局函数（与包内 store.ts 同口径，不引入 Node 专属类型）。
 declare function setTimeout(fn: (...args: unknown[]) => void, ms: number): unknown
+
+// 读侧 CLI 用到的最小 process 形状：参数、退出、stdout/stderr、终端判定、环境变量。
+// 引擎两侧（宿主与浏览器闭包）都不用 process，所以这些声明只服务于入口层与 platform。
+declare const process: {
+  argv: string[]
+  env: Record<string, string | undefined>
+  exit(code?: number): void
+  exitCode?: number
+  stdout: { write(text: string): boolean; isTTY?: boolean }
+  stderr: { write(text: string): boolean }
+}
+
+// URL 由运行环境提供（Node 与浏览器都有），但 `lib: ["ES2020"]` 里没有它，故声明最小形状。
+declare class URL {
+  constructor(input: string, base?: string | URL)
+  readonly pathname: string
+  readonly href: string
+}
+
+// `import.meta.url` 同样不在 lib: ["ES2020"] 里（它由 DOM 或 @types/node 提供）。
+// 本包只用它一次：读侧 CLI 由自己所在位置往上找 package.json 取版本号。
+interface ImportMeta {
+  readonly url: string
+}

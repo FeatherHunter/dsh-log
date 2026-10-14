@@ -319,6 +319,45 @@ export interface LogTimer {" }
      from = '        logDiagnostic: write.logDiagnostic,'
      to   = '        logDiagnostic: write.log,' }
 
+  # —— 2026-10-15 读侧工具（0.4.0）：渲染丢人话、阈值失效、坏行照印、根目录不认、跟读不跟、无 shebang ——
+  # M79 渲染时不取 message → 人话丢了（读侧存在的意义）。
+  @{ name = 'M79 渲染丢 message（人话没了）'; file = 'core/read-row.js'
+     tests = 'format-row'; pattern = '渲染：本地时间形状固定'
+     from = "    const message = typeof fields[messageField] === 'string' ? fields[messageField] : '';"
+     to   = "    const message = '';" }
+  # M80 --level 阈值失效 → 任何级别都显示（等于没过滤）。
+  @{ name = 'M80 --level 阈值失效（不过滤）'; file = 'cli/tail.js'
+     tests = 'cli-tail'; pattern = '过滤：--level'
+     from = "        if (typeof severity === 'number' && severity > LEVEL_SEVERITY[options.level])"
+     to   = "        if (false)" }
+  # M81 解析不了的行也照原样印 → 半行、坏行、audit 行全混进人话列表。
+  # 注意锚点取在 collectMatches：那里与 outputOf 都有 null 守卫（双保险），只改 outputOf 是**等效变异**
+  # （实测 GREEN），必须改「跳过解析失败行」这一处才咬得住。
+  @{ name = 'M81 坏行/半行照原样印'; file = 'cli/tail.js'
+     tests = 'cli-tail'; pattern = '默认渲染：按写入顺序'
+     from = "                const row = parseLogLine(line);`n                if (row === null || !matches(row, options, nowMs))`n                    continue;"
+     to   = "                const row = parseLogLine(line);`n                if (row === null) {`n                    out.push(line);`n                    continue;`n                }`n                if (!matches(row, options, nowMs))`n                    continue;" }
+  # M82 可执行入口丢掉 shebang → npx dsh-log 装出来不能执行。
+  @{ name = 'M82 bin 丢掉 shebang'; file = 'cli.js'
+     tests = 'release-surface'; pattern = 'bin 指向真实文件'
+     from = "#!/usr/bin/env node"
+     to   = "// no-shebang" }
+  # M83 只认日志目录、不看根目录下的 logs-*/ → 给父目录就说「没找到」。
+  @{ name = 'M83 不认日志根目录（logs-* 不扫）'; file = 'cli/tail.js'
+     tests = 'cli-tail'; pattern = '目录发现：给日志根目录'
+     from = "        const names = (await listDirNames(path)) ?? [];"
+     to   = "        const names = [];" }
+  # M84 -f/--follow 被忽略 → 只印一次就退出。
+  @{ name = 'M84 -f 跟读被忽略'; file = 'cli/args.js'
+     tests = 'cli-tail'; pattern = '-f 跟读'
+     from = "        if (arg === '-f' || arg === '--follow') {"
+     to   = "        if (false) {" }
+  # M85 对齐时把 ANSI 转义也算进宽度 → 上色后整个人话列位推歪。
+  @{ name = 'M85 对齐把 ANSI 算进宽度'; file = 'core/read-row.js'
+     tests = 'format-row'; pattern = '渲染：默认不上色'
+     from = "    const padCount = Math.max(0, eventWidth - event.length);"
+     to   = "    const padCount = Math.max(0, eventWidth - (colored.length + event.length));" }
+
   # M57 封存照单全收：rename 调完就当搬走了，不回查目录（2026-10-14 soak 实测的旧行为：
   # 假适配器下整篇被覆写、20k 行静默丢 12500 行、dropped 仍是 0）。
   @{ name = 'M57 封存不回查目录（rename 说成功就当真）'; file = 'engine/rotation.js'
@@ -445,6 +484,9 @@ foreach ($m in $mutations) {
   $psi = [System.Diagnostics.ProcessStartInfo]::new()
   $psi.FileName = (Get-Command node).Source
   $psi.UseShellExecute = $false
+  # 工作目录必须钉在临时副本上：不设的话 cwd 还是活仓库，凡是靠 process.cwd() 定位 dist 的测试
+  # 都会读到**没被变异**的那份，把注入的缺陷漏成 GREEN（2026-10-15 实测 M79–M85 六条假绿）。
+  $psi.WorkingDirectory = $work
   $psi.RedirectStandardOutput = $true
   $psi.RedirectStandardError = $true
   foreach ($argItem in @('--test', '--test-reporter=spec', ("--test-name-pattern=" + $pat), $testPath)) { $psi.ArgumentList.Add($argItem) }

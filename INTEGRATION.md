@@ -215,6 +215,37 @@ if (clientLog.isEnabled('info')) {
 
 累计丢弃数随时可读：`clientLog.getDroppedCount()`（宿主侧是 `store.getDroppedCount()`）。失败只计数不抛错，队列满与转发失败都只加到这个数里；宿主写盘失败**先不丢行**——整批进重试位、有界自动重试，只有还压在内存里的行（重试位 + 队列）超过上限（`maxQueue × 10`）才丢最旧的普通行并响一次 `onDrop('write-fail')`，`error/warn` 留到最后，写盘一恢复 `synced()` 就补落盘。
 
+## 步骤 4b. 看日志（0.4.0 起带读侧工具）
+
+落盘行是给机器读的（五键一行），所以「看」有两条路，都不改写盘行为：
+
+```bash
+npx dsh-log tail ./cache/logs-my-plugin            # 人话渲染最后 200 行（只读：不写、不改、不删）
+npx dsh-log tail ./cache/logs-my-plugin -f         # 跟着看：先给最后 20 行，然后等新行
+npx dsh-log tail ./cache --level error --since 1h  # 只看近一小时的 error
+npx dsh-log tail ./cache --trace <traceId>         # 追一条链（按 traceId）
+npx dsh-log tail ./cache --json | jq .             # 回到机器态，交给 jq
+```
+
+目录给插件的日志目录（`logs-my-plugin`）或它的父目录（`cache`，里面是 `logs-*/`）都认。半行（有人正在写）与解析不了的行一律跳过；封存件按写入先后排在可写文件之前。
+
+程序里想自己渲染（纯函数，浏览器也能用）：
+
+```js
+import { parseLogLine, formatRow } from 'dsh-log'
+
+const rows = text.split('\n').map(parseLogLine).filter(Boolean)   // 坏行与半行自动是 null
+for (const row of rows) console.log(formatRow(row))               // 2026-10-14 17:55:07 ERROR net.unreachable  网络异常：…  (host=api.example.com)
+```
+
+想让人话更好读，写日志时多给一个 `message` 字段（运行期不拦任何字段；清单里没登记的字段只会让离线检查器黄灯）：
+
+```js
+clientLog.log('error', 'net.unreachable', { message: '网络异常：连接 api.example.com 超时 3s', host: 'api.example.com' })
+```
+
+**做完的判据**：`npx dsh-log tail <日志目录>` 打出的行数与你写进去的用户行一致（自监控行也在，前缀是 `log.`），且目录里的文件在跑工具前后**一个字节都没变**。细节、选项表与「为什么人话不写进存储格式」见 README 第 3.1／3.2 节。
+
 ## 步骤 5. 接入对象清单（可选，但推荐）
 
 1. 把包内的 `event-list.template.json` 复制一份，`pluginId` 换成自己插件的标识，按实际事件填 `events`。三类条数不再手填（0.3.0 删了 `counts`：解析时忽略，缺失也不抛，唯一真源是 `computeEventCounts` 自算）。只含一条事件的最小例子：
@@ -227,13 +258,13 @@ if (clientLog.isEnabled('info')) {
     "my-plugin.hello": {
       "level": "info",
       "kind": "resident",
-      "fields": ["step"]
+      "fields": ["step", "message"]
     }
   }
 }
 ```
 
-上面这条是常驻信息事件：事件名 `my-plugin.hello`，级别 `info`，归类 `resident`，允许字段只有 `step`。**`kind: 'resident'` 是运行期真生效的**（0.3.0 起）：写侧放行集合 = 包内固定 43 个 DSH 常驻名 ∪ 清单里标了 `resident` 的事件名，所以 `my-plugin.hello` 这类 `info` 在调试开关关着时也照样落盘；没标 `resident` 的 `info` 仍只在开关打开时记（返回 `'skipped'`，不计入丢弃数）。下面第 3 步检查器示例用的正是这条，上下两环对上了。
+上面这条是常驻信息事件：事件名 `my-plugin.hello`，级别 `info`，归类 `resident`，允许字段是 `step` 与 `message`。`fields` 里特意留了 `message`：**事件名给人看不懂没关系，人话放 `message`**——`event` 是稳定代码名（可 grep、可计数、可聚合），`message` 是给人与 AI 读的一句自然语言（写侧不拦，只是清单里登记了检查器就不黄）；渲染成终端一行见 README 第 3.2 节。**`kind: 'resident'` 是运行期真生效的**（0.3.0 起）：写侧放行集合 = 包内固定 43 个 DSH 常驻名 ∪ 清单里标了 `resident` 的事件名，所以 `my-plugin.hello` 这类 `info` 在调试开关关着时也照样落盘；没标 `resident` 的 `info` 仍只在开关打开时记（返回 `'skipped'`，不计入丢弃数）。下面第 3 步检查器示例用的正是这条，上下两环对上了。
 
 2. 自己读成对象再传给 `eventList`（日志包不读盘；`prefix` 与 `pluginId` 双必填，别忘了）：
 
@@ -250,7 +281,7 @@ const hostLog = createHostLog(deps, { pluginId: 'my-plugin', prefix: 'my-plugin'
 import { parseEventListManifest, lintEventFields, computeEventCounts } from 'dsh-log/host'
 
 const manifest = parseEventListManifest(myEventList)
-lintEventFields(manifest, 'my-plugin.hello', ['step'])
+lintEventFields(manifest, 'my-plugin.hello', ['step', 'message'])
 computeEventCounts(manifest)
 ```
 

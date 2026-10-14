@@ -71,7 +71,7 @@ export function logFileDate(config: FileNameConfig, name: unknown): string {
 // 写入先后＝行的时间先后。封存是「把当前可写文件改名成 .N，再开一个新的可写文件」，
 // 所以 .1 装的是当天最早的行、序号越大越新，而可写文件（seq 0）永远装最新的行 —— 它排在最后。
 // 注意不能按字典序排：`YYYY-MM-DD.10.log` 在字典序里排在 `YYYY-MM-DD.2.log` 前面。
-function writeOrderRank(info: LogFileInfo): number {
+export function logFileWriteOrder(info: LogFileInfo): number {
   return info.seq === 0 ? Number.MAX_SAFE_INTEGER : info.seq
 }
 
@@ -84,8 +84,8 @@ export function logFilesOfDate(config: FileNameConfig, names: readonly unknown[]
     if (info && info.date === date) out.push(info)
   }
   out.sort((a, b) => {
-    const ra = writeOrderRank(a)
-    const rb = writeOrderRank(b)
+    const ra = logFileWriteOrder(a)
+    const rb = logFileWriteOrder(b)
     if (ra !== rb) return ra - rb
     return a.name < b.name ? -1 : a.name > b.name ? 1 : 0
   })
@@ -102,8 +102,8 @@ export function listLogFiles(config: FileNameConfig, names: readonly unknown[]):
   }
   out.sort((a, b) => {
     if (a.date !== b.date) return a.date < b.date ? -1 : 1
-    const ra = writeOrderRank(a)
-    const rb = writeOrderRank(b)
+    const ra = logFileWriteOrder(a)
+    const rb = logFileWriteOrder(b)
     if (ra !== rb) return ra - rb
     return a.name < b.name ? -1 : a.name > b.name ? 1 : 0
   })

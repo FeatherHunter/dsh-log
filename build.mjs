@@ -74,9 +74,19 @@ function headerFor(tsName) {
 /** 与门禁同一口径：转译加包头，换行归一，末尾恰好一个换行。 */
 export function transpileUnit(tsName) {
   const tsPath = resolve(SRC_DIR, tsName)
-  const source = readFileSync(tsPath, 'utf8')
+  let source = readFileSync(tsPath, 'utf8')
+  // 可执行入口（package.json 的 bin）的 shebang 必须是文件**第一行**：转译器把它当注释留在原位，
+  // 而我们要在它前面加 AUTO-GENERATED 包头，所以先自己摘下来、转译后再放回最前面。
+  // （BOM 也要摘：带 BOM 时 startsWith('#!') 是 false，shebang 会被当成非法 token。）
+  if (source.charCodeAt(0) === 0xfeff) source = source.slice(1)
+  let shebang = ''
+  if (source.startsWith('#!')) {
+    const nl = source.indexOf('\n')
+    shebang = (nl > 0 ? source.slice(0, nl) : source) + '\n'
+    source = nl > 0 ? source.slice(nl + 1) : ''
+  }
   const body = loadEngine().transform(source).replace(/\r\n/g, '\n').replace(/\s+$/, '') + '\n'
-  return headerFor(tsName) + body
+  return shebang + headerFor(tsName) + body
 }
 
 // ---- 转译引擎（0.3.0 修）：优先 esbuild（与历史产物同源），缺失则回退 TypeScript 自带转译器。 ----
