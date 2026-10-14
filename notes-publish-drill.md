@@ -2,50 +2,60 @@
 
 这份文件记的是「发出去的是什么」：每发一版，把原始输出与关键数字留在下面，供下一个人复现和核对。文中的字节数、文件数都描述**当时发出去的那一份**，不是当前工作区。0.2.0 是首次公开发布，随 Node 程序入口一起上线；此前只有本地演练（见第四节）。
 
-## 〇、待发布：dsh-log 0.3.0（破坏性版本，只发一次）
+## 〇、已发布：dsh-log 0.3.0（破坏性版本，只发一次）
 
-**状态（2026-10-14）：代码与文档已就绪、门禁全绿，等一次交互式登录后发布。** 本机 `npm whoami` 报 `ENEEDAUTH`，
-而 npm 官方源发布会要求浏览器授权/动态码（0.2.1 那次后台直跑报 `EOTP`、什么都没发出去），所以这一步必须由人在**交互终端**里做。
-
-发布前最后核对（发布那一刻再跑一遍，全部要过）：
-
-| 项 | 命令 | 期望 |
-| --- | --- | --- |
-| 类型 | `node node_modules/typescript/bin/tsc -p tsconfig.json` | exit 0（`.bin/tsc` 垫片是坏的，别用 `npm run typecheck` 之外的垫片路径） |
-| 全量测试 | `npm test` | 180/180、19 套、exit 0 |
-| 变异表 | `pwsh -NoProfile -File scripts/mutation-check.ps1` | 基线全绿、72 条逐条 RED、0 SKIP/GREEN/TIMEOUT |
-| 长跑自检 | `node tests/soak.mjs 6` | A 段 20000/20000、B 段查询行数 === 磁盘行数 |
-| 构建可复现 | `rm -rf dist && node build.mjs` | 产物与删除前逐字节一致（44 JS + 44 `.d.ts`） |
-| 打包干跑 | `npm publish --dry-run` | 93 文件、44 JS + 44 `.d.ts`（体积以当次输出为准） |
-
-一键走完六段（体检 → 网页登录 → 版本号 → 构建与干跑 → 真发布 → 发布后验证），在**包根**用 Git Bash 跑：
+**状态（2026-10-14）：已发布到官方源，`dist-tags.latest` = 0.3.0。** 发布者 `feather_wch`（维护者本人），用的是**自动化 token**（`//registry.npmjs.org/:_authToken`，无需浏览器授权/动态码）——上一节 0.2.1 那次后台直跑报 `EOTP`，就是因为当时用的是需要二次验证的凭据。发布命令：
 
 ```bash
-"C:\Program Files\Git\bin\bash.exe" publish-wizard.sh
+npm publish --userconfig <只含该 token 的临时 npmrc>
 ```
 
-向导已按 0.3.0 的现状改过：当前版本（0.3.0）还没发过官方源，**直接回车就发当前版本**，不会再逼你换号；
-第四段会同时检查 `dist/node.js` 与 `dist/node.d.ts`（声明由 tsc 产出）。
+token 只写进 `%TEMP%` 下的临时 npmrc，不进仓库、不写进 `.npmrc`（仓库现在没有 `.npmrc`，也不该有）。
 
-发布后必须补的四项核对（照第三节清单做）：
+发布那一刻的门禁（发之前逐条跑过，全绿）：
 
-1. 官方源：`npm view dsh-log version` = 0.3.0、`dist-tags.latest` = 0.3.0（同步有约 1 分钟延迟）。
-2. 发布修订：`npm view dsh-log@0.3.0 gitHead` 等于发布那一刻的仓库 HEAD（复核时用 `git merge-base --is-ancestor <sha> HEAD`，不要直接比当天 HEAD）。
-3. 包内文档与仓库逐字一致：下载 tarball 解开，包内 `README.md` / `INTEGRATION.md` 的 SHA256 与仓库同名文件相同（0.2.0 就是漏了这步发了旧稿）。
-4. 陌生机器装一次：空目录 `npm install dsh-log@0.3.0`，`import { createQuickLog } from 'dsh-log'` 能建库写出五键行；再跑一次 `tsc --strict`（`types: []`、不装 `@types/node`）确认四个入口都有类型。
+| 项 | 结果 |
+| --- | --- |
+| 类型 | `node node_modules/typescript/bin/tsc -p tsconfig.json` exit 0 |
+| 全量测试 | `npm test` **180/180、19 套**、exit 0 |
+| 变异表 | `pwsh -NoProfile -File scripts/mutation-check.ps1` 基线全绿、**72 条逐条 RED**、0 SKIP/GREEN/TIMEOUT |
+| 长跑自检 | `node tests/soak.mjs 6` A 段 20000/20000 落盘、B 段查询行数 === 磁盘行数 |
+| 构建可复现 | `node build.mjs` 产出 44 JS + 44 `.d.ts`，与入库产物逐字节一致 |
+| 打包冒烟 | `node scripts/pack-smoke.mjs` 通过（含真装 tarball 写一行五键） |
+| 打包干跑 | `npm publish --dry-run` → 93 文件 |
 
-发布这一版的已知边界（要写进发布说明，别让使用者自己踩）：
+发布后四项核对（逐条做过，数字如下）：
 
-- **破坏性变更**：不兼容 0.2.x。插件按 `INTEGRATION.md` 的迁移七步重开发；`0.2.x` 的 `sampleRate` 参数已删（它从未参与任何判定），`setLogSwitch` 现在只收一个布尔参。
-- **跨进程零保护**：同目录多实例的占用登记是模块副本级的，跨进程不设防；文档已写成风险提示。
-- **不发 `.d.ts` 之外的东西**：包内不含 `src`、不含测试；`dist` 是入库产物。
-- 已发布版本里 **0.3.0 是首次带类型的版本**（0.2.x 装到 TS 工程里会报 TS7016）。
+1. **官方源**：`dist-tags.latest` = `0.3.0`（发布后约 4 分钟可见，符合 npm 的「正在处理」提示）；`time.0.3.0` = `2026-10-14T04:47:56Z`（北京时间 12:47:56）。
+2. **发布修订**：`npm view dsh-log@0.3.0 gitHead` = `c77ea6e504e79040c9af3c089554e02e47ceeb98`，等于发布那一刻的仓库 HEAD。
+3. **包内文档与仓库逐字一致**（下载源上 tarball 解包比 SHA256，前 12 位）：`README.md` `AF3DCFAD6F74`、`INTEGRATION.md` `03DC9AEFC11E`、`LICENSE` `326012A43D1F`、`event-list.template.json` `A024DCBB8AA8` —— 四项全 SAME。
+4. **陌生机器装一次**：空目录 `npm install dsh-log@0.3.0` → 装到 0.3.0、44 个 `.d.ts`；运行时冒烟 `createQuickLog` 写一行 → `<cacheDir>/logs-quick/2026-10-14.log` 五键 `[event,fields,level,ts,v]`、`v=3`、`ready` = `{ok:true,pending:0,lastPersistFail:null}`；类型冒烟 `strict` + `types: []`（不装 `@types/node`）+ `skipLibCheck: false` → 四个入口零报错，故意写错的一行如实报 `TS2322`。
+   - 踩坑记录：第一次 `npm install dsh-log@0.3.0` 报 `notarget`，是**本机 packument 缓存还停在 0.2.2**；加 `--prefer-online` 即装上（同一天稍后装的人不会遇到）。
 
-下面这段留空，等发布时把 `npm publish` 的原始输出粘进来（与 0.2.0/0.2.1 两节同口径）：
+发出去的这一份（`npm publish` 原始输出）：
 
 ```text
-（发布后粘贴）
+npm notice name: dsh-log
+npm notice version: 0.3.0
+npm notice filename: dsh-log-0.3.0.tgz
+npm notice package size: 134.0 kB
+npm notice unpacked size: 410.9 kB
+npm notice shasum: 9abee95a47e611aab020a021a772ad92ff4aaf46
+npm notice integrity: sha512-XljgcsG1kAuk+9ArdpkY3OxbyW75NN7fbj0mUAEPoSxlAoM67phD8XIppMD6vpRoYwI0Ge2RHryUjrknOK0dXw==
+npm notice total files: 93
+npm notice Publishing to https://registry.npmjs.org/ with tag latest and public access
++ dsh-log@0.3.0
 ```
+
+源上元数据：`dist.fileCount` = 93、`dist.unpackedSize` = 410928、`dist.tarball` = `https://registry.npmjs.org/dsh-log/-/dsh-log-0.3.0.tgz`。
+
+发布这一版的已知边界（已写进下面第三节的发布说明口径，别让使用者自己踩）：
+
+- **破坏性变更**：不兼容 0.2.x。插件按 `INTEGRATION.md` 的迁移七步重开发；`0.2.x` 的 `sampleRate` 参数已删（它从未参与任何判定），`setLogSwitch` 现在只收一个布尔参。
+- **跨进程零保护**：同目录多实例的占用登记是模块副本级的，跨进程不设防；文档已写成风险提示（有 `appendText` 时只交错不覆写，没有时可能吃掉对方的行，两种形态都会留 `foreign-write` 诊断）。
+- **包内不含 `src`、不含测试**：发出去的是 `dist`（44 JS + 44 `.d.ts`）+ 两份文档 + 模板 + LICENSE；`dist` 是入库产物。
+- **0.3.0 是首次带类型的版本**（0.2.x 装到 TS 工程里会报 TS7016）。
+- 发布后的回滚口径：`npm deprecate dsh-log@0.3.0 "<原因>"`，不要 `unpublish`（0.3.0 可以被 0.3.1 覆盖修复；只有发出去 24 小时内才允许 unpublish）。
 
 ## 一、已发布：dsh-log 0.2.1
 
