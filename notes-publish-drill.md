@@ -2,7 +2,9 @@
 
 这份文件记的是「发出去的是什么」：每发一版，把原始输出与关键数字留在下面，供下一个人复现和核对。文中的字节数、文件数都描述**当时发出去的那一份**，不是当前工作区。0.2.0 是首次公开发布，随 Node 程序入口一起上线；此前只有本地演练（见第四节）。
 
-## 〇.1 dsh-log 0.3.1（2026-10-15；已就绪、待发布）
+## 〇.1 dsh-log 0.3.1（已发布，2026-10-14 19:41 +08:00）
+
+**状态**：已发布到官方源，`dist-tags.latest` = **0.3.1**。发布者 `feather_wch`（维护者本人），用自动化 token；token 只写进 `%TEMP%` 的临时 npmrc（`npm publish --userconfig <该文件>`），发完即删，**仓库里没有 `.npmrc`**。发布命令：`npm publish --userconfig <临时 npmrc>`。
 
 **改了什么**（细节见 `research/16-release-0.3.1.md` 与 `research/17-read-side-toolkit.md`）。口径说明：这一版曾按「先不发、留在仓库里」搁置，之后又落了读侧工具，用户明确 **全部改动都算 0.3.1**（所以不再拆成 0.4.0）：
 
@@ -25,7 +27,31 @@
 | `npm pack --dry-run` | 103 个文件（`files` 白名单） |
 | 公开面快照（`tests/public-surface.test.mjs`） | 35 / 23 / 17 / 4（根入口 +3＝读侧三个函数） |
 
-**发布后要核对的四项**（与 0.3.0 同款）：①官方源 `dsh-log@0.3.1` 的 `gitHead` 等于本仓发布时的 HEAD；②tarball 内四份文档 SHA256 与仓库逐字一致；③全新工程装一次，运行冒烟（写一行五键 `v=3`）与类型冒烟（`strict` + `types: []`，不装 `@types/node`）都过，且 `npx dsh-log --version` 能跑；④本节的原始输出补上。
+**发布原始输出**：
+
+```
++ dsh-log@0.3.1
+npm notice name: dsh-log
+npm notice version: 0.3.1
+npm notice filename: dsh-log-0.3.1.tgz
+npm notice package size: 155.7 kB
+npm notice unpacked size: 464.3 kB
+npm notice shasum: 310cc6b0008606e45550b3efabe54c1600eceb13
+npm notice integrity: sha512-tJzFYsgmPzJ4Z[...]qo60yBUMX+rPA==
+npm notice total files: 103
+npm notice Publishing to https://registry.npmjs.org/ with tag latest and public access
+```
+
+**源上元数据**（直连 `https://registry.npmjs.org/dsh-log` 取，绕开本地 npm 缓存）：`dist-tags.latest` = **0.3.1**；versions = `0.2.0 / 0.2.1 / 0.2.2 / 0.3.0 / 0.3.1`；`0.3.1.gitHead` = `7054cb2eccc07f0598da8e3ab7e85e28e3710467`（＝发布时本仓 HEAD）；`dist.fileCount` = 103；`dist.unpackedSize` = 464315；`dist.shasum` = `310cc6b0008606e45550b3efabe54c1600eceb13`；`dist.integrity` = `sha512-tJzFYsgmPzJ4Z...qo60yBUMX+rPA==`。
+
+**发布后四项核对（逐条做过）**：
+
+1. **`gitHead` 等于发布时 HEAD** ✓（`7054cb2e…`，见上）。
+2. **tarball 内四份文档与仓库逐字一致**（SHA256 前 16 位）：`README.md` `21716EEEBCCDD86D`、`INTEGRATION.md` `C6ADE507E09CF5DB`、`LICENSE` `326012A43D1F139C`、`event-list.template.json` `A024DCBB8AA8408E`；包内共 103 个文件。（发布**之后**仓库里又改了两处说明：README 第 9 节的「官方源最新」由 0.3.0 改成 0.3.1、第 10 节版本策略归一——所以包内文档与**当前**仓库不再逐字一致；那是发版之后的事，下次发版自然会带上。）
+3. **空工程装一次（用全新 npm 缓存目录 `--cache`，模拟陌生机器）**：装到 `0.3.1`、随包 49 个 `.d.ts`；运行冒烟 `createQuickLog` 写两行 → `ready {"ok":true,"pending":0,"lastPersistFail":null}`、落盘五键 `v=3`（`{"v":3,...,"event":"smoke.step","fields":{"message":"装一次就能跑","step":"install"}}`）；随包命令行 `node node_modules/dsh-log/dist/cli.js ./cache` 打出人话两行；`--version` = `0.3.1`；类型冒烟（`strict` + `types: []` + `skipLibCheck:false`，不装 `@types/node`）`tsc` exit 0。
+4. **本节即原始输出与四条核对记录** ✓。
+
+**踩坑（与 0.3.0 同一个）**：本机 npm 的 packument 缓存会滞后——`npm view dsh-log version` 与 `npm install dsh-log@0.3.1` 一度仍看到 0.3.0 / 报 `ETARGET notarget`，而**直连 registry HTTP 立刻就能看到 0.3.1**（`dist-tags.latest` 已更新）。核对源上状态请直连 registry，或换一个 `--cache` 目录，别把本地缓存当成「源上没生效」。
 
 ## 〇、已发布：dsh-log 0.3.0（破坏性版本，只发一次）
 
