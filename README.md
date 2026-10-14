@@ -7,7 +7,7 @@
 | 词 | 含义 |
 |---|---|
 | 实例 | 一次建库（宿主的 `createHostLog`、Node 的 `createNodeHostLog`/`createQuickLog`、客户端的 `createClientLog`）得到的对象；队列、丢弃数、开关状态各自独立 |
-| 丢弃数 `dropped` | `getDroppedCount()` 的累计值，**只数用户行**；内部诊断行不计 |
+| 丢弃数 `dropped` | `getDroppedCount()` 的累计值。**宿主侧只数用户行**（引擎自己的诊断行不计）；**客户端侧含引擎自己生成的 `log.forward.summary` 汇总行**，所以可能略大于「被拒的用户行数」 |
 | 诊断行 | 引擎自己写的 `log.persist.fail`（warn 级）、`log.rotate.*`、`log.retain.*`（info 级）；不进告警面、不计 `dropped` |
 | 常驻（resident） | 开关关着也落盘的事件 = 包内固定 43 个 DSH 事件名 ∪ 清单里 `kind: 'resident'` 的名字 |
 | 封存 | 当日文件超过 `maxSize` 时原子改名成 `YYYY-MM-DD.N.log` 并另开新文件；改不了名就降级并留 `log.rotate.degraded` |
@@ -71,7 +71,8 @@ registerHostLogPhones(registry, hostLog)                     // 注册 5 个写�
 
 ```js
 const res = await hostLog.store.handleLogQuery({ pluginId: 'wf' })
-if (res.denied) return '无权：只查自己插件的日志'
+if (res.denied) console.warn('无权：只查自己插件的日志')   // denied 时 entries 为空，但源行没被删
+else console.log(`本插件 ${res.entries.length} 行，下一页游标 ${res.nextCursor}`)
 ```
 
 分页与游标（第六参 `page`，回包字段：`ok` / `entries` / `denied` / `expired` / `nextCursor` / `skipped`）：
@@ -188,9 +189,13 @@ for (const line of text.split('\n').filter(Boolean)) {
 **⑩ 客户端接不通宿主时**（不抛错，给机器码 + 有界重试）：
 
 ```js
-clientLog.setLogSwitch(true)         // 失败原因只给机器码：host-unavailable / host-rejected / switch-timeout / stale
-clientLog.getDroppedCount()          // 传输失败先入重试位（3 次退避），到顶才按「被拒条数」如实计数
-await clientLog.reconcileLogSwitch() // 启动对账，开关以宿主为准
+const res = await clientLog.setLogSwitch(true)   // 失败时 res.ok === false，原因在 res.error（机器码，不是中文文案）
+// res.error 取值：host-unavailable（没接宿主）/ host-rejected（宿主回 ok 为假）/
+//   switch-timeout（看门狗 5000ms 超时）/ stale（被后一次设置顶掉）/
+//   throw-unknown-endpoint / throw-connection / throw（宿主调用抛错，按错误文案归三类）
+// reconcileLogSwitch 只回 { ok, enabled }，不带 error 码——要机器码就调 setLogSwitch
+await clientLog.reconcileLogSwitch()             // 启动对账：以宿主那边持久化的开关为准
+clientLog.getDroppedCount()                      // 传输失败先入重试位（首发 1 次 + 最多 3 次重试，退避 500ms×次数），到顶才按「被拒条数」如实计数；这个数含引擎自己那行 log.forward.summary
 ```
 
 **⑪ 高频写入怎么选参数**：写盘是异步的（约 1000 毫秒防抖，`error`/`warn` 走直通不等防抖）；宿主队列默认 1000 行，满了按级别丢（普通行丢新并响一次 `onDrop`，`error`/`warn` 挤最旧普通行、挤不下就越过配额硬塞）；单文件超过 `maxSize` 封存，所以「一天的量」决定单次覆写体积。写量想从 O(全文) 降到 O(新增)，给文件服务加 `appendText`（`dsh-log/node` 自带）。要确认某一刻之前的行都在文件里，就 `await store.synced()`。
@@ -210,6 +215,7 @@ log.store.setOnDrop((count, reason) => console.warn('[dsh-log] 丢弃', count, r
 | 刚写的行查不到 | 查询默认只看**近 24 小时**；且只看得见**已落盘**的行 | 先 `await synced()`；要查更早的窗口就传 `timeRange` |
 | 查不到历史行 | `skipped` 计数（`v != 3` 的旧行）与封存/清理 | `v != 3` 的行查询跳过但仍在文件里、导出可见；封存件照常参与查询 |
 | 查询回 `expired: true` | 当天的文件集合变了（封存、清理、跨天） | 清掉本次已累积结果，从第一页重新翻（宁可重读，不漏读） |
+| 查询结果为空但明明写了行 | `level` 写错字（如 `'nonsense'`）会**静默回空集、不报错**；`keyword` 只匹配**事件名 + `fields` 的 JSON 文本**（不是整行、不搜别的字段） | `level` 用四级别名之一（支持逗号分隔多值）；先 `await synced()` 再查；`v != 3` 的旧行计入 `skipped` 而不出现在 `entries` 里 |
 | 查别家日志回 `denied` | 跨桶读被拒是设计 | 由宿主用 `aggregateLogQuery` 显式授权（配方 ⑤）；被拒不等于源行被删 |
 | 建库抛「已有活跃写者」 | 同一日志目录已有活跃实例 | 前一个实例 `release()`，或换目录；宿主入口是写盘那一刻判、会自愈；跨进程不设防（见本文开头「先跑起来」末条） |
 | 开关开了 `info` 还是不落 | 宿主入口的磁盘开关在**第一次 `logGetSwitch` 电话**时才读；`dsh-log/node` 建库即读 | 按 `INTEGRATION.md` 路线 A/B 的对照表确认读取时机 |
@@ -270,7 +276,7 @@ const report = await log.ready   // 读一次刷一次；report.ok 为真才代�
 - **根 `dsh-log`（32）**：常量 `LOG_FORMAT_VERSION`、`EVENT_LEVELS`、`EVENT_KINDS`、`LOG_DEBOUNCE_MS`、`DEFAULT_MAX_QUEUE`/`DEFAULT_MAX_SIZE`/`DEFAULT_MAX_DAYS`、`CLIENT_BATCH_MAX`/`CLIENT_BATCH_INTERVAL_MS`/`CLIENT_PACKET_BYTES`/`CLIENT_QUEUE_MAX`、`LEGACY_LOG_DIR_NAME`/`LEGACY_SWITCH_FILE_NAME`；配置 `assertPluginId`、`resolveHostLogConfig`、`resolveClientLogConfig`、`PHONE_ACTIONS`；电话名 `buildPhoneName`、`buildPhoneNames`、`buildLogQueryPhoneName`、`LOG_QUERY_ACTION_SUFFIX`；文件名 `parseLogFileName`、`listLogFiles`、`logFilesOfDate`、`matchExportFileName`、`formatDailyFileName`、`formatFourSegmentFileName`、`resolveLogFileName`；清单 `parseEventListManifest`、`checkEventFields`、`lintEventFields`、`computeEventCounts`。
 - **宿主 `dsh-log/host`（23）**：建库 `createLogStore`、`createHostLog`；注册 `registerHostLogPhones`、`HOST_LOG_PHONE_ACTIONS`、`LOG_DIR_NAME`、`LOG_SWITCH_FILE`、`formatLogFileName`；跨插件聚合 `aggregateLogQuery`；其余（`LOG_FORMAT_VERSION`、`LOG_DEBOUNCE_MS`、`LOG_QUERY_ACTION_SUFFIX`、`buildPhoneName(s)`、`buildLogQueryPhoneName`、`resolveHostLogConfig`、`parseLogFileName`、`listLogFiles`、`logFilesOfDate`、`formatDailyFileName`、`parseEventListManifest`、`checkEventFields`、`lintEventFields`、`computeEventCounts`）是与根入口**同源**的转出口。
 - **客户端 `dsh-log/client`（17）**：建日志器 `createClientLog`；批量口径 `CLIENT_BATCH`、`LOG_BATCH_MAX`、`LOG_PACKET_BYTES`、`LOG_QUEUE_MAX`、`LOG_FLUSH_MS`、`LOG_WATCHDOG_MS`、`LOG_LEVELS`、`LOG_REV`、`LOG_DEBUG_KEY`、`debugStorageKey`；电话名 `buildClientPhoneNames`、`buildPhoneName(s)`、`buildLogQueryPhoneName`、`LOG_QUERY_ACTION_SUFFIX`、`resolveClientLogConfig`（其中电话名与配置部分与根入口同源）。
-- **Node `dsh-log/node`（4）**：`createQuickLog`（最省事：自动找目录、自带文件服务与计时器）、`createNodeHostLog`（要自己传 `cacheDir`）、`createNodeFileService`、`createNodeTimer`（后两个可以当宿主入口的 `fs`/`timer` 用）。
+- **Node `dsh-log/node`（4）**：`createQuickLog(cacheDir, pluginId?)`（最省事：文件服务、计时器都不用给——但 `cacheDir` **仍必填**，本入口不猜日志写到哪）、`createNodeHostLog({ cacheDir , fs? , timer? , joinPath? }, config)`（同样自带文件服务与计时器，只是配置要按宿主那套显式给 `pluginId`/`prefix`）、`createNodeFileService`、`createNodeTimer`（后两个可以当宿主入口的 `fs`/`timer` 用）。
 
 ## 3. 三步接入（宿主侧）
 
@@ -332,7 +338,7 @@ registerHostLogPhones(new Map(), hostLog)
 
 写侧 5 个动作之外还有一个只读查询电话 `前缀.logQuery`（由 `buildLogQueryPhoneName` 派生，六参见第 7 节前的查询说明）：宿主入口 `registerHostLogPhones` 一共注册 6 个（上面 5 个写侧 + 这个只读查询），撞名同样抛、不覆盖旧的；`hostLog.phoneNames` 那份冻结映射仍只有 5 个写侧动作名。
 
-导出成功回 8 个键（含原文 `text`、摘要 `summary`、目录与路径 `dir`/`path`）；导出失败只回 4 个键（`ok`、`fileName`、`bytes`、`fallback`），调用处走失败分支处理。
+导出回包有三种形状，**按 `ok` 与 `fallback` 判断，别按键数分支**：正常成功回 8 键（含原文 `text`、摘要 `summary`、目录与路径 `dir`/`path`）；**该日没有文件**时仍回 8 键、`ok: true` 且 `fallback: true`（`text` 可能是空串）；**导出过程内部抛错**时回 4 键（`ok: false`、`fileName`、`bytes`、`fallback`），拿不到日志根目录时回 8 键但 `ok: false`。
 
 ### 5.2 客户端两种消费方式（二选一）
 
@@ -383,7 +389,7 @@ clientLog.log('info', 'my.event', { step: 'started' })   // info 需开关打开
 
 `logBatch` 的回包说实话（#19 审查必改 R1）：`accepted` 只数**真进了队列**的条数，本批有一行没进就回 `ok` 为假（调用方由此可算被拒条数＝`entries.length - accepted`）；`dropped` 仍是宿主侧**累计**丢弃数，不是本批的。累计数只数用户行：`log.persist.fail`、`log.rotate.*` 这类内部诊断行不计入（它们自己落盘失败也不计）。注意 `ok` 为真只代表**已进落盘路径**，不代表已落盘——写盘失败时行进重试位（有界重试，磁盘恢复后补落盘），那一刻仍是 `ok` 为真加 `dropped` 不变；要确认真的落盘请 `await store.synced()`。
 
-开关读写失败保持旧值，不回退为开启。客户端写开关失败原因只给机器码（`host-unavailable`、`host-rejected`、`switch-timeout`、`stale` 等），面向用户的文案由界面经多语言系统转换。
+开关读写失败保持旧值，不回退为开启。客户端写开关失败原因只给机器码（`host-unavailable`、`host-rejected`、`switch-timeout`、`stale`，宿主调用抛错时按文案归为 `throw-unknown-endpoint` / `throw-connection` / `throw` 三类），面向用户的文案由界面经多语言系统转换。
 
 `log.persist.fail` 的 `reason` 取值（都是内部自监控行，`level` 为 `warn`，不计入 `dropped`）：`write-fail`（写盘重试后仍失败，行在重试位）、`dir-conflict`（目录或开关文件被别的活跃写者占着）、`no-dir`（取不到日志目录）、`foreign-write`（**跨进程可观测**：下次读回来发现这份文件的长度与我们自己上次写完的对不上——说明有别的写者动过它，见第 1 节末条）、`append-not-effective`（自己实现的 `fs` 声明了 `appendText` 却一个字节都没写：独立核对发现长度没涨，那批行改用读改写补上）、`append-partial`（`appendText` 只写了一部分——含「写完才抛错」的情况：核对发现少了多少就只补那一段，绝不整篇重写）、`append-failed`（`appendText` 直接抛错，同样退回读改写）。这三个都在把追加能力判死之后才记，一个实例最多各记一次；`foreign-write` 只报告「有人动过」，不猜被吃了几行，所以丢弃数不会跟着涨。
 
@@ -391,7 +397,7 @@ clientLog.log('info', 'my.event', { step: 'started' })   // info 需开关打开
 
 一天一个可写文件：`<cacheDir>/logs-<pluginId>/YYYY-MM-DD.log`。写盘是「读旧文 + 拼新行 + 全文覆写」（文件服务没有追加原语），所以按天分文件把单次覆写体积封顶在一天之内；再超就在写之前封存。
 
-- **封存**：写这批之前，若「当日文件已有内容 + 这批要写的字节数 > `maxSize`」，先把当日文件**原子改名**成 `YYYY-MM-DD.N.log`（`N` 从 1 起取当前没占用的最小序号），再新建当日文件写这批；封存成功记 `audit.json` 一条 `rotate.seal`，并落一行 info 自监控 `log.rotate.seal`（带 `file`/`sealed`）。
+- **封存**：写这批之前，若「**当日文件已有内容 > 0**」且「已有内容 + 这批要写的字节数 > `maxSize`」，先把当日文件**原子改名**成 `YYYY-MM-DD.N.log`（`N` 从 1 起取当前没占用的最小序号），再新建当日文件写这批；封存成功记 `audit.json` 一条 `rotate.seal`，并落一行 info 自监控 `log.rotate.seal`（带 `file`/`sealed`）。**一批自身就超阈值时不封存**（没有旧文可封，封了也白搭），改成落一行 `log.rotate.oversize`（见下一条）——实测 `maxSize: 300` 时一次性入队 12 行（约 1.3KB）只会写在当日文件里，不会产生封存件。
 - **不能安全封存时就降级**：绝不拿「复制 + 截断」冒充原子改名，也绝不在一行会变两份的路径上动手。落一行 info 自监控 `log.rotate.degraded`，`reason` 如实写是哪一种：
   - `no-listdir`——适配器没提供 `listDir`（列不出目录就无法在改名后验证，所以**根本不改名**）。这是能力协商的第一道闸：rename 是不可逆副作用，验不了就别做；
   - `no-rename`——适配器没提供 `rename`；
@@ -402,7 +408,7 @@ clientLog.log('info', 'my.event', { step: 'started' })   // info 需开关打开
 - **单批自己就超阈值**：这批的字节数本身就大于 `maxSize` 时无法封存（没有旧文可封），照常写入并落一行 info 自监控 `log.rotate.oversize`（带 `file`/`bytes`/`maxSize`）——不静默。
 - **审计**：日志目录里的 `audit.json` 逐条记账（`rotate.seal`、`retain.evict`），一行一条 JSON。
 - **自监控不进告警面**：`log.rotate.*` 与 `log.retain.*` 都是 **info** 级，不占 `warn`/`error` 的队列配额与告警面，也不计入累计丢弃数（`dropped` 只数用户行）。
-- **清空**：`logClear` 点名某天只删那一天的 `YYYY-MM-DD.log`（四段式策略下删那一天的全部文件）；点今天直接回 0、不碰文件；`date: 'all'` 删日志目录里所有匹配文件名的 `.log`，但**当天可写文件**、开关文件与 `audit.json` 永不删。封存件 `<日期>.N.log` 在点名模式下不动（它们由上面的保留清理按天回收）。
+- **清空**：`logClear` 点名某天删**那天的全部文件**——可写的 `YYYY-MM-DD.log` 与封存件 `YYYY-MM-DD.N.log` 一起删（一天是一个单位；四段式策略下删那一天的全部文件）；点**今天**直接回 `removed: 0`、不碰任何文件；`date: 'all'` 删日志目录里所有匹配文件名的 `.log`（往日可写件与往日封存件都删），但**今天的可写文件与封存件**、开关文件、`audit.json` 永不删。实测三条：往日「可写 + 封存」两份 → 点名该日 `removed: 2`；点今天 `removed: 0`；`all` 只删往日那两份、当天三份文件原样。
 
 ## 7. 对象清单、模板与检查器（#561）
 
@@ -464,7 +470,7 @@ node tests/update-snapshots.mjs       # 清单新增字段后：先把黄转绿�
 node scripts/pack-smoke.mjs           # 打包冒烟：真打包 + 真装进全新工程 + 真写一行（发行面一层）
 ```
 
-CI 已把上面这些固化成三条作业（`.github/workflows/ci.yml`）：测试矩阵在 **ubuntu 与 windows 各跑 Node 22 / 24**（含类型检查、`npm test`、快速长跑、打包冒烟）；变异表只在 windows 上跑（脚本是 PowerShell），**基线不绿即整表作废，出现一条不是 RED 的变异就 exit 1**；没有 lockfile，所以用 `npm install` 而不是 `npm ci`。
+CI 已把上面这些固化成**两条作业**（`.github/workflows/ci.yml`）：`test` 是测试矩阵，在 **ubuntu 与 windows 各跑 Node 22 / 24**（含类型检查、`npm test`、快速长跑、打包冒烟——**打包冒烟是这一步里的一步，不是独立作业**）；`mutation` 只在 windows 上跑（脚本是 PowerShell），**基线不绿即整表作废，出现一条不是 RED 的变异就 exit 1**；没有 lockfile，所以用 `npm install` 而不是 `npm ci`。
 
 快照门禁只有黄/红两档（#18 Q6）：黄 warn——清单新增字段但快照未更新（`tests/snapshot.test.mjs` 只警告不判红，跑 `node tests/update-snapshots.mjs` 一键更新即转绿，不阻排障）；红 error——未知事件名、envelope 非法（落盘行五键 `{v,ts,level,event,fields}` 中 `v` 不为 3 或形状不对）、事件总数突变（与 `tests/event-snapshots/_baseline.json` 比 ±超 5 且 `tests/event-snapshots/CHANGELOG.md` 无说明；红的是“无 changelog”不是字段本身，补说明后跑更新命令即转绿）。事件条数就记在 `tests/event-snapshots/` 这套快照里，别在文档里抄数字。
 
@@ -511,7 +517,7 @@ CI 已把上面这些固化成三条作业（`.github/workflows/ci.yml`）：测
 1. **建库双必填**：补 `pluginId`＋`prefix`（各 1 行）。`wf` 只留旧版，新插件传自己 id，不传直接抛，不再回退。
 2. **删手拼目录**：目录／开关／存储键改自动派生（`logs-<id>`、`log-switch-<id>.json`、`dsws.debug.<id>`），删手拼代码 3 处；旧开关作废，需重开一次。
 3. **切 quick 入口**：首屏换 `quick` 默认入口（依赖预设，3 行可用）；老三入口按新签名重接。
-4. **`flush/ready` → `synced()`**：全局替换；`ready()` 只表示 sink 已开＋队列就绪，保落盘只认 `synced()`；Node 短命程序注册 `beforeExit` 钩。
+4. **0.2.x 的 `flush()` 与 `ready()` → `synced()` / `log.ready`**：0.2.x 的 `ready()` 只表示 sink 已开、不等落盘，0.3.0 已没有这个方法——Node 入口的 `log.ready` 现在是**只读属性**，老代码里 `await log.ready()` 会直接报 `log.ready is not a function`；新语义是「读一次刷一次」并回执 `{ok, pending, lastPersistFail}`（`ok` 为真才算落定）。老代码一律改成 `await store.synced()`，或短命程序在结尾 `await log.ready`；Node 短命程序还可注册 `beforeExit` 钩。
 5. **清单删 `counts`**：删 1 块手填计数（实现自算）；`checkEventFields` 换 `lintEventFields`（未知字段 warn、未知事件 error，红不拦上线）。
 6. **解析加 `v===3` 断言**：追踪改从 `fields.traceId/spanId/seq` 取；跨边界原样透传，禁重写 `traceId`；调用方显式处理查询 `denied`（`if(res.denied)` 样板）。
 7. **旧日志手动导出一次**：`v!=3` 旧行跳过＋计数不抛错，error 旧行仍可查；新目录从空开始。

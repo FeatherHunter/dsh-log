@@ -45,7 +45,7 @@ registerHostLogPhones(registry, hostLog)                        // 注册 5 个�
 
 ```js
 const res = await hostLog.store.handleLogQuery({ pluginId: 'wf' })
-if (res.denied) return '无权：只查自己插件的日志'
+if (res.denied) console.warn('无权：只查自己插件的日志')   // denied 时 entries 为空，但源行没被删
 ```
 
 宿主侧 `await hostLog.store.synced()` 等落盘；Node 短命程序注册退出钩 `hostLog.store.beforeExit()`（重复调用只注册一次）。选路规则不变：先按自己的形态选一条路走，**不要两条都走**。
@@ -197,7 +197,7 @@ clientLog.flush()
 
 宿主是唯一的落盘者：客户端只进队列就返回，转发走电话，落盘走宿主刷盘链路。
 
-落盘之后文件会长成什么样（#21 轮转与保留，宿主侧自动做，插件不用管）：一天一个可写文件 `<cacheDir>/logs-<pluginId>/YYYY-MM-DD.log`；单文件超过 `maxSize`（默认 5MB）就把当日文件原子改名成 `YYYY-MM-DD.N.log` 再开新文件，改名成功记 `audit.json` 一条 `rotate.seal`；宿主给的 fs 没有 `rename` 就不封存、继续追加，并落一行 info 级 `log.rotate.degraded`（一行都不丢）。早于「今天往前 `maxDays - 1` 天」（默认 14）的 `.log` 会在每次写盘前清掉，记账 `retain.evict`。`log.rotate.*` 与 `log.retain.*` 都是 info 级自监控行，不占 `warn`/`error` 的告警面，也不计入累计丢弃数。`logClear` 点名某天只删那天的 `YYYY-MM-DD.log`，点今天与 `date: 'all'` 都不碰当天可写文件、开关文件与 `audit.json`。
+落盘之后文件会长成什么样（#21 轮转与保留，宿主侧自动做，插件不用管）：一天一个可写文件 `<cacheDir>/logs-<pluginId>/YYYY-MM-DD.log`；单文件超过 `maxSize`（默认 5MB）就把当日文件原子改名成 `YYYY-MM-DD.N.log` 再开新文件，改名成功记 `audit.json` 一条 `rotate.seal`；宿主给的 fs 没有 `rename` 就不封存、继续追加，并落一行 info 级 `log.rotate.degraded`（一行都不丢）。早于「今天往前 `maxDays - 1` 天」（默认 14）的 `.log` 会在每次写盘前清掉，记账 `retain.evict`。`log.rotate.*` 与 `log.retain.*` 都是 info 级自监控行，不占 `warn`/`error` 的告警面，也不计入累计丢弃数。`logClear` 点名某天删那天的全部文件（可写件 `YYYY-MM-DD.log` 与封存件 `YYYY-MM-DD.N.log` 一起删），点今天回 `removed: 0`，`date: 'all'` 删所有匹配的 `.log`；**今天的文件（含今天的封存件）**、开关文件与 `audit.json` 在任何模式下都不删。
 
 **做完的判据**：在缓存目录下的 `logs-my-plugin` 目录里找到当天的 `年月日.log` 文件，里面有 `my-plugin.hello` 这一条。
 
@@ -293,7 +293,7 @@ computeEventCounts(manifest)
 1. **建库双必填**：补 `pluginId`＋`prefix`（各 1 行）。`wf` 只留旧版，新插件传自己 id，不传直接抛，不再回退。
 2. **删手拼目录**：目录／开关／存储键改自动派生（`logs-<id>`、`log-switch-<id>.json`、`dsws.debug.<id>`），删手拼代码 3 处；旧开关作废，需重开一次。
 3. **切 quick 入口**：首屏换 `quick` 默认入口（依赖预设，3 行可用）；老三入口按新签名重接。
-4. **`flush/ready` → `synced()`**：全局替换；`ready()` 只表示 sink 已开＋队列就绪，保落盘只认 `synced()`；Node 短命程序注册 `beforeExit` 钩。
+4. **0.2.x 的 `flush()` 与 `ready()` → `synced()` / `log.ready`**：0.2.x 的 `ready()` 只表示 sink 已开、不等落盘，0.3.0 已没有这个方法——`log.ready` 现在是**只读属性**，`await log.ready()` 会报 `log.ready is not a function`；新语义是「读一次刷一次」＋回执 `{ok, pending, lastPersistFail}`（`ok` 为真才算落定）。老代码改成 `await store.synced()`，或短命程序结尾 `await log.ready`；还可注册 `beforeExit` 钩。
 5. **清单删 `counts`**：删 1 块手填计数（实现自算）；`checkEventFields` 换 `lintEventFields`（未知字段 warn、未知事件 error，红不拦上线）。
 6. **解析加 `v===3` 断言**：追踪改从 `fields.traceId/spanId/seq` 取；跨边界原样透传，禁重写 `traceId`；调用方显式处理查询 `denied`（`if(res.denied)` 样板）。
 7. **旧日志手动导出一次**：`v!=3` 旧行跳过＋计数不抛错，error 旧行仍可查；新目录从空开始。
