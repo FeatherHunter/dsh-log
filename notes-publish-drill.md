@@ -2,9 +2,9 @@
 
 这份文件记的是「发出去的是什么」：每发一版，把原始输出与关键数字留在下面，供下一个人复现和核对。文中的字节数、文件数都描述**当时发出去的那一份**，不是当前工作区。0.2.0 是首次公开发布，随 Node 程序入口一起上线；此前只有本地演练（见第四节）。
 
-## 〇.0 dsh-log 0.3.3（待发布，2026-10-15）
+## 〇.0 dsh-log 0.3.3（已发布，2026-10-15 04:00 +08:00）
 
-**状态**：代码/文档/记录已就绪，**尚未发布**（要发布就按第三节走向导，需要 npm 凭据）。
+**状态**：**已发布**。发布后四项核对全过（见本节末「发布记录」）。
 
 **改了什么**（三件加法，公共接口只增不改）：
 
@@ -26,6 +26,32 @@
 **发布后四项核对（照 0.3.0/0.3.1/0.3.2 的老规矩做）**：①源上 `dist-tags.latest` 与 `gitHead` 对齐本仓 HEAD；②包内四份文档（README/INTEGRATION/LICENSE/模板）SHA256 与仓库逐字一致；③陌生机器（全新 `--cache` 目录）装一次：`createQuickLog` 写一行五键 `v=3`、`await log.ready` 回 `{ok:true,pending:0,lastPersistFail:null}`、`dsh-log tail` 与 `dsh-log export` 都能跑、`--version` = 0.3.3；④本节记录原始输出。
 
 **回滚口径**：`npm deprecate dsh-log@0.3.3 '<原因>'`，不做 `unpublish`。
+**发布记录（原始输出，2026-10-15 04:00 +08:00）**
+
+```text
++ dsh-log@0.3.3
+package size: 168.4 kB   unpacked size: 496.7 kB   total files: 109
+shasum: 7aca73499dacc63eea5314eba4f70f43398813a6
+integrity: sha512-ymrfYbQV76A7x[...]5e9EBiNKMM6zA==
+```
+
+源上元数据（直连 `https://registry.npmjs.org/dsh-log/0.3.3`，发布后约 1 分钟可见）：
+
+| 项 | 值 |
+|---|---|
+| `gitHead` | `3830a8bba1256a962a69ffab9027877bc74f757d`（= 发布时本仓 HEAD） |
+| `dist.fileCount` / `unpackedSize` | 109 / 496708 |
+| `dist.shasum` | `7aca73499dacc63eea5314eba4f70f43398813a6` |
+| `bin` | `dist/cli.js`（npm 发布时把源里的 `./dist/cli.js` 归一化；已在仓库里同步改成不带 `./`，下次不再有该告警） |
+
+发布后四项核对：
+
+1. **gitHead 一致** ✓（上表）。
+2. **包内四份文档与仓库逐字一致** ✓：README `536F8EE67A012971`、INTEGRATION `9F528CBF4DE42471`、LICENSE `326012A43D1F139C`、`event-list.template.json` `A024DCBB8AA8408E`（连同 `package.json` `7361DEEC1529695B` 都比过）。
+3. **陌生机器装一次**（全新 `--cache` 目录 + 空工程）✓：装到 **0.3.3**、52 个 `.d.ts`；运行时冒烟 `await quick.ready` → `{"ok":true,"pending":0,"lastPersistFail":null}`、落盘五键 `v=3`；**0.3.3 新能力实跑**——`store.trace()` 写的行 `fields` 带 `traceId`(16 hex)/`spanId`(8 hex)/`seq`，`getHeaderInfo()` 回 `{pid,startedAt,dir,pluginVersion:'9.9.9',os:''}`，`host.start` 行里带 `pluginVersion`；`dsh-log tail` 出人话三行；`dsh-log export` 出摘要（`启动头: … pluginVersion=9.9.9 os=unknown`、`读不出来: os, logSwitch`）+ 原始行；`--version` = 0.3.3；`npx dsh-log --version` = 0.3.3（bin 映射可用）。
+4. **类型冒烟** ✓：消费方 `strict` + `types: []` + `skipLibCheck: false`（不装 `@types/node`），`moduleResolution: NodeNext` + `type: module`，同时 import 根入口与 `dsh-log/node` → `tsc` exit 0。
+
+**已知（0.3.4 候选）**：`dsh-log/node` 没给 `getPlatform`，所以它写出的目录 `os` 恒为 `unknown`（写者自己的 `process.platform` 在写这一刻是可知的真事实，不算「读者环境顶替」）；另外 `writeStartupHeader()` 不幂等，node 入口使用者再手调一次会写出第二行 `host.start`。
 ## 〇.1 dsh-log 0.3.2（已发布，2026-10-15 01:37 +08:00）
 
 **状态**：已发布到官方源，`dist-tags.latest` = **0.3.2**。发布者 `feather_wch`（自动化 token，只写进 `%TEMP%` 的临时 npmrc、`npm publish --userconfig <该文件>`，发完即删——仓库里没有 `.npmrc`）。

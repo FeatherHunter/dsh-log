@@ -14,7 +14,7 @@
   "type": "module",
   "types": "./dist/index.d.ts",
   "bin": {
-    "dsh-log": "./dist/cli.js"
+    "dsh-log": "dist/cli.js"
   },
   "exports": {
     ".": {
