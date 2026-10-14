@@ -26,7 +26,7 @@ export interface QueuedRow {
     level: string;
     event: string;
     fields: Record<string, unknown>;
-    selfMon?: boolean;
+    isDiagnostic?: boolean;
 }
 /** 记录电话（handleLogBatch）入参里的一条：调用方给的原始四元组，级别与事件名都还没验。 */
 export interface LogEntry {

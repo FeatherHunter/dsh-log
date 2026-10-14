@@ -1423,7 +1423,7 @@ describe('#19 全栈隔离（五层契约）', () => {
     assert.equal(hostMod.buildLogQueryPhoneName('iso-u5-other'), 'iso-u5-other.logQuery')
   })
 
-  // #19 复核必改 3：闸门那一批里的自监控行保护点（src/store.ts 的 deferSelfMonRows 分支）此前零覆盖——
+  // #19 复核必改 3：闸门那一批里的自监控行保护点（src/engine/pipeline.ts 的 deferDiagnosticRows 分支）此前零覆盖——
   // 删掉它、或让它取批尾（吞用户行）都不掉一条测试。这条用例把复核者 probe-d3 的时序固化成回归线：
   // 写失败一轮 → 重试位 [w1,w2]（无自监控行）→ 队列 [自监控行 F1, 用户行 r1, r2] → 另一实例慢写占租约 →
   // 闸门先拦重试位那批、再拦队列这批（闸门是这批里唯一的 defer 点）。

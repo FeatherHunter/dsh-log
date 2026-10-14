@@ -1,7 +1,7 @@
 import type { PhoneNameMap } from '../config.js';
 import type { ForwardState } from './forward.js';
 import type { ClientHost, ClientQueuedRow, ClientSendResult, ClientTimer } from './types.js';
-export interface SendRigInput {
+export interface SendStageInput {
     host: ClientHost | null;
     phoneNames: PhoneNameMap;
     /** 待发队列（就地取批）。 */
@@ -21,16 +21,15 @@ export interface SendRigInput {
         id: unknown;
     };
     timer: ClientTimer | null;
-    log: (level: string, event: string, fields: Record<string, unknown>) => void;
     laterRun: (fn: () => void, ms: number) => unknown;
     maybeForwardSummary: () => void;
     scheduleLogFlush: (immediate: boolean) => void;
 }
-export interface SendRig {
+export interface SendStage {
     sendLogBatch: () => Promise<ClientSendResult>;
     flush: () => {
         ok: boolean;
     };
     getDroppedCount: () => number;
 }
-export declare function createSendRig(rig: SendRigInput): SendRig;
+export declare function createSendStage(input: SendStageInput): SendStage;

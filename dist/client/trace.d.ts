@@ -1,8 +1,8 @@
 import type { TraceState } from './types.js';
-export interface TraceRig {
+export interface TraceStage {
     ensureSpanId: () => string;
     ensureForLevel: (level: string) => string | null;
 }
-export declare function createTraceRig(input: {
+export declare function createTraceStage(input: {
     state: TraceState;
-}): TraceRig;
+}): TraceStage;

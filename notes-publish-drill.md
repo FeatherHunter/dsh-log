@@ -2,6 +2,28 @@
 
 这份文件记的是「发出去的是什么」：每发一版，把原始输出与关键数字留在下面，供下一个人复现和核对。文中的字节数、文件数都描述**当时发出去的那一份**，不是当前工作区。0.2.0 是首次公开发布，随 Node 程序入口一起上线；此前只有本地演练（见第四节）。
 
+## 〇.1 dsh-log 0.3.1（补丁版，2026-10-15）
+
+**改了什么**（两类，公共接口一个没动；细节见 `research/16-release-0.3.1.md`）：
+
+1. **客户端丢弃计数口径修正**：库自己写的诊断行（`log.forward.summary` 等）不再计入 `dropped`，与宿主侧同口径；修前「1 行用户日志 + 宿主长坏」会报成丢 2 行。
+2. **内部命名整改**：`selfMon` → `isDiagnostic`；客户端四个工厂 `create*Rig`/`*RigInput` → `create*Stage`/`*StageInput`（参数 `rig` → `input`）；删掉一处从未使用的注入（`SendStageInput.log`）。公开导出名与事件清单数据值 `kind: 'selfmon'` 未动。
+3. 顺带修掉第一条汇总行 `windowMs` 报 epoch 量级（`lastSummaryAt` 从实例建成那一刻起算）。
+
+**发布前门禁（本机实跑）**：
+
+| 项 | 结果 |
+|---|---|
+| `tsc -p tsconfig.json` | exit 0 |
+| `node build.mjs` | 44 JS + 44 `.d.ts` |
+| `npm test` | 181 / 181（19 套） |
+| `scripts/mutation-check.ps1` | 75 / 75 RED（新增 M76–M78 咬住新口径） |
+| `node scripts/pack-smoke.mjs` | 通过 |
+| `node tests/soak.mjs 0 --fast` | A 段 20000/20000、`dropped` 0 |
+| 公开面快照（`tests/public-surface.test.mjs`） | 32 / 23 / 17 / 4 不变 |
+
+**发布后要核对的四项**（与 0.3.0 同款）：①官方源 `dsh-log@0.3.1` 的 `gitHead` 等于本仓发布时的 HEAD；②tarball 内四份文档 SHA256 与仓库逐字一致；③全新工程装一次，运行冒烟（写一行五键 `v=3`）与类型冒烟（`strict` + `types: []`，不装 `@types/node`）都过；④本节的原始输出补上。
+
 ## 〇、已发布：dsh-log 0.3.0（破坏性版本，只发一次）
 
 **状态（2026-10-14）：已发布到官方源，`dist-tags.latest` = 0.3.0。** 发布者 `feather_wch`（维护者本人），用的是**自动化 token**（`//registry.npmjs.org/:_authToken`，无需浏览器授权/动态码）——上一节 0.2.1 那次后台直跑报 `EOTP`，就是因为当时用的是需要二次验证的凭据。发布命令：

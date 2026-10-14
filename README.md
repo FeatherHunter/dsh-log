@@ -7,7 +7,7 @@
 | 词 | 含义 |
 |---|---|
 | 实例 | 一次建库（宿主的 `createHostLog`、Node 的 `createNodeHostLog`/`createQuickLog`、客户端的 `createClientLog`）得到的对象；队列、丢弃数、开关状态各自独立 |
-| 丢弃数 `dropped` | `getDroppedCount()` 的累计值。**宿主侧只数用户行**（引擎自己的诊断行不计）；**客户端侧含引擎自己生成的 `log.forward.summary` 汇总行**，所以可能略大于「被拒的用户行数」 |
+| 丢弃数 `dropped` | `getDroppedCount()` 的累计值。**只数用户行**——宿主侧与客户端侧同一口径，引擎/客户端自己写的诊断行（如 `log.forward.summary`）被拒收或被裁掉都不计入 |
 | 诊断行 | 引擎自己写的 `log.persist.fail`（warn 级）、`log.rotate.*`、`log.retain.*`（info 级）；不进告警面、不计 `dropped` |
 | 常驻（resident） | 开关关着也落盘的事件 = 包内固定 43 个 DSH 事件名 ∪ 清单里 `kind: 'resident'` 的名字 |
 | 封存 | 当日文件超过 `maxSize` 时原子改名成 `YYYY-MM-DD.N.log` 并另开新文件；改不了名就降级并留 `log.rotate.degraded` |
@@ -302,6 +302,88 @@ registerHostLogPhones(new Map(), hostLog)
 
 一次建库调用得到一个独立实例：内存队列、累计丢弃数、开关状态各自独立，互不串。
 
+## 3.1 真实输出长什么样（2026-10-14 实跑抓取，原样贴出）
+
+> 下面每一行都是从磁盘文件里原样读出来的，没有手写改写；`ts` 是毫秒时间戳，落盘就是「一行一条 JSON」。
+
+**① 最省事的入口**（`createQuickLog`，见「先跑起来」）：`<cacheDir>/logs-quick/2026-10-14.log`
+
+```json
+{"v":3,"ts":1791970144215,"level":"warn","event":"your.step.fail","fields":{"step":"fetch","reason":"timeout"}}
+{"v":3,"ts":1791970144215,"level":"error","event":"db.conn.fail","fields":{"host":"db-1","retries":3}}
+```
+
+`await log.ready` 的回执：`{"ok":true,"pending":0,"lastPersistFail":null}`
+
+**② 宿主 + 客户端桥接（带追踪三件套）**：`<cacheDir>/logs-my-plugin/2026-10-14.log`
+
+```json
+{"v":3,"ts":1791970144228,"level":"info","event":"my.app.started","fields":{"port":8080,"traceId":"80670256ab1237b7","spanId":"f81528dc","seq":0}}
+{"v":3,"ts":1791970144228,"level":"warn","event":"my.step.slow","fields":{"step":"fetch","ms":1200,"traceId":"80670256ab1237b7","spanId":"f81528dc","seq":1}}
+{"v":3,"ts":1791970144228,"level":"error","event":"my.step.fail","fields":{"step":"fetch","status":500,"traceId":"80670256ab1237b7","spanId":"f81528dc","seq":2}}
+```
+
+- 落盘恒为**五键**（`v`/`ts`/`level`/`event`/`fields`）；`traceId`（16 位十六进制）、`spanId`（8 位）、`seq` 都住在 `fields` 里，不额外加顶层键。
+- 同一条链：`traceId` 不变、`spanId` 每层刷新、`seq` 在本实例内单调（子实例从 0 起）。
+- 开关文件 `<cacheDir>/log-switch-my-plugin.json` 内容是 `{"enabled":true}`。**宿主入口的开关住在宿主侧文件里**：客户端的 `log('info', …)` 想落盘，得宿主那份开关是开的（客户端 `setLogSwitch(true)` 会走电话改到宿主文件，也可以宿主自己 `store.setSwitch(true)`）。
+
+**③ 轮转与审计**（`maxSize: 300`、4 批 × 3 行）：`logs-rot/` 里出现
+
+```
+2026-10-14.log      418 字节   ← 当前可写文件（同时只有这一个在写）
+2026-10-14.1.log    261 字节   ← 封存件，序号越大越新
+2026-10-14.2.log    418 字节
+2026-10-14.3.log    418 字节
+audit.json          354 字节   ← 逐次记账（不是日志行，读侧不当日志）
+```
+
+封存件里带着「这次封存」的那一行（原样）：
+
+```json
+{"v":3,"ts":1791970144244,"level":"info","event":"log.rotate.seal","fields":{"file":"2026-10-14.log","sealed":"2026-10-14.1.log","bytes":261,"maxSize":300}}
+```
+
+`audit.json` 一行一条记录（原样）：
+
+```json
+{"ts":1791970144243,"op":"rotate.seal","file":"2026-10-14.log","sealed":"2026-10-14.1.log","bytes":261,"maxSize":300}
+```
+
+**④ 保留字冲突**（调用方自己传了 `traceId`/`spanId`/`seq`）：`logs-shadow/2026-10-14.log`
+
+```json
+{"v":3,"ts":1791970144262,"level":"warn","event":"log.trace.shadow","fields":{"event":"my.shadow.demo","shadowed":["traceId","spanId","seq"]}}
+{"v":3,"ts":1791970144262,"level":"warn","event":"my.shadow.demo","fields":{"note":"保留字归库","_shadow":{"traceId":"caller-supplied","spanId":"caller-span","seq":99},"traceId":"0e04dcae752f5864","spanId":"0cdcc3c4","seq":0}}
+```
+
+**永不整行拒收**：调用方自己的值被搬进 `fields._shadow` 保底、主行照落，另附一行 `log.trace.shadow` 说明搬了什么。
+
+**⑤ 库自己写的诊断行**：宿主长坏时，客户端把「丢了多少」汇总成一行再试着送出去。它在客户端队列里的原样（`isDiagnostic` 是**内存标记**，不落盘）：
+
+```json
+{"v":3,"ts":1791970144267,"level":"warn","event":"log.forward.summary","fields":{"droppedDelta":1,"totalDropped":1,"reason":"send-fail","windowMs":0,"traceId":"278ba4e81c43a3a9","spanId":"9e0ba37c","seq":1},"isDiagnostic":true}
+```
+
+它被宿主收下后真会落盘（宿主先拒后通时抓到的原样一行）：
+
+```json
+{"v":3,"ts":1791970144347,"level":"warn","event":"log.forward.summary","fields":{"droppedDelta":1,"totalDropped":1,"reason":"host-reject","windowMs":65,"accepted":0,"skipped":0,"rejected":1,"traceId":"4d245b6ad8cb33a7","spanId":"d57acfc3","seq":1}}
+```
+
+- **丢弃计数只数用户行**：上面这行是库自己写的，它被拒收不会让 `getDroppedCount()` 上涨（宿主侧与客户端侧同一口径）。
+- `reason` 取值：`send-fail`（没有宿主 / 发送抛错）、`host-reject`（宿主明确拒收）、`packet-trim`（超包或队列积压被裁）。
+
+**读法速查**
+
+| 看到什么 | 含义 |
+|---|---|
+| `log.rotate.*` / `log.retain.*`（info） | 轮转与保留的自监控，不进告警面、不计 `dropped` |
+| `log.persist.fail`（warn） | 落盘/追加/别人动过文件，`reason` 区分是哪一种 |
+| `log.forward.summary`（warn） | 客户端这一段的丢弃汇总 |
+| `log.trace.shadow`（warn） | 保留字冲突；主行里 `fields._shadow` 是调用方原本的值 |
+| `fields._shadow` | 被搬走的保留字（库不丢你的数据，只是不让它占库自己的键） |
+| `v` | 行格式版本，0.3.0 恒为 `3`；读侧遇到 `v != 3` 跳过并计入 `skipped` |
+
 ## 4. 配置默认值派生（#558 冻结）
 
 必填两项：插件标识 `pluginId` 与电话名前缀 `prefix`，都要显式传入，缺任一即抛中文错（0.2.x 的「prefix 缺省回退到 pluginId」已删）。两者同一套字符约束：只能用小写英文字母、数字、中横线，长度 1 到 32。收到大写直接报错，不做静默转小写；收到含点或文件不安全字符（斜杠、反斜杠、冒号、星号、问号、引号、尖括号、竖线、空格）的值同样报错，因为点留作前缀与动作名之间的分隔符，拼进目录名与文件名后必须仍是合法名字。
@@ -498,6 +580,15 @@ CI 已把上面这些固化成**两条作业**（`.github/workflows/ci.yml`）�
           ← 零 IO、零上层：换平台、纯函数单测、以及「哪些级别永不丢」这类判定都靠这一层
 ```
 
+**命名约定（2026-10-15 定稿；改代码时照着写，门禁之外靠评审守）**：
+
+- **目录**：一层一个关注点。`core/`＝领域（零 IO、纯判据）、`platform/`＝端口与适配器、`engine/`＝宿主落盘引擎、`client/`＝客户端发送面、`host/`＝电话面、`config/`＝配置面；各层的 `*.ts` 门面只 re-export，不放实现。
+- **文件**：kebab-case 名词，说清「里面装什么」——`file-name.ts`（文件名解析单源）、`dir-lease.ts`（目录租约）、`switch-file.ts`（开关文件）、`log-names.ts`（日志文件名）、`event-list.ts`（清单与离线检查器）。不用缩写词，不出现 `utils`/`helpers`/`misc`。
+- **工厂**：`create<物>(input: <物>Input): <物>` —— `createLogStore`、`createEngineIo`、`createRotation`、`createSwitchFile`、`createWriteStage`、`createSendStage`、`createForwardStage`、`createTraceStage`、`createSwitchCache`、`createSwitchOps`；测试直接测这个「物」，不测内部私有函数。
+- **判定与类型**：布尔判定用 `is/has/can` 前缀（`isKnownLevel`、`isUrgentLevel`、`isDiagnostic`、`canAppend`、`canSize`）；类型用「名词 + 语义」（`LogRowV3`、`QueuedRow`、`LogOutcome`、`WriteOutcome`、`SealOutcome`）；常量全大写带单位（`DIR_LEASE_WAIT_MS`、`APPEND_ATOMIC_MAX`、`RETRY_BACKOFF_MS`）。
+- **一个概念一个词**：宿主侧的「自监控行」与客户端的「诊断行」在代码里都叫 `isDiagnostic`；事件清单里那个**公开数据值**仍叫 `kind: 'selfmon'`（改它会破坏 0.3.0 用户已写好的清单文件），两者说的是同一件事。
+- **不许有第二个真源**：文件名解析、级别语义（哪些级别永不丢）、腾位选行、保留字搬迁、常驻事件集合，各只有一份实现；`tests/arch.test.mjs` 的分层断言 + 上面的树是判据。
+
 门禁规矩（逐条与 `tests/arch.test.mjs` 的断言一致）：`core/` 只引 core 内部；`platform/` 只引 `node:` 内置、core 与 platform 内部；配置面只引 core 与配置面内部**且内部无环**；面与引擎不许引入口层；`node:` 内置的**白名单只有三个文件**——`platform/fs-node.ts`、`platform/timer-node.ts`、`node.ts`（入口层的 `index.ts`、`host.ts` 与组合根都不许碰 `node:`，IO 一律走 platform 端口）；`engine/`、`client/`、`host/` 三个面**互不认识**、也不反向引用组合根（跨面组合只发生在组合根与入口——否则同一份语义会在两个面里各长一份）；全包零运行时依赖、不许 `require`。另一条守卫是 `tests/public-surface.test.mjs`——四个入口的导出名集合快照，搬代码时护着公开面不漂移（要改公开面就得同时改名单与文档）。
 
 官方源最新是 **0.3.0**（2026-10-14 发布，`npm view dsh-log version` 自查；此前公开版本为 0.2.x）。0.3.0 这一次的原始输出、四项发布后核对与已知边界都记在包根的 `notes-publish-drill.md`（不随包发布）。再发新版本时，除了上面两步，还要按第 10 节的版本策略定版本号、把实际发布输出记进那份记录，或用包目录下的发布向导脚本 `publish-wizard.sh` 走一遍完整流程（体检、登录、升版本、干跑、发布、发布后验证六段）。发布后有一件事向导不代做、但必须自己做：核对包内 `README.md` 与 `INTEGRATION.md` 跟仓库一致——发出去的是发布那一刻的文档，仓库里改的不会自动跟上。本仓当前没有 `.npmrc`，也**不要**往仓库里放 token：要么用只含自动化 token 的临时 npmrc（`npm publish --userconfig <临时文件>`），要么临时设 `NODE_AUTH_TOKEN`。
@@ -505,6 +596,8 @@ CI 已把上面这些固化成**两条作业**（`.github/workflows/ci.yml`）�
 ## 10. 版本策略
 
 语义化版本。破坏性变更有 5 类：电话改名、增删改入参回参形状、改配置写法、改事件清单字段形状、改文件名策略的默认形状。自首个公开发布起算，日志系统的公共接口连续 3 个版本无破坏性变更之前不议拆。
+
+**0.3.1（2026-10-15）是补丁版**，两类改动、公共接口一个没动：①**客户端丢弃计数口径修正**——库自己写的诊断行（如 `log.forward.summary`）不再计入 `dropped`，与宿主侧同口径（修前 1 行用户日志可能被报成「丢 2 行」）；②**内部命名整改**——`selfMon`→`isDiagnostic`、客户端四个工厂 `create*Rig`→`create*Stage`；顺带修掉第一条汇总行 `windowMs` 报 epoch 量级的问题。
 
 ## 11. 安全声明与许可证
 

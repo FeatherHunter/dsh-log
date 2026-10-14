@@ -120,10 +120,10 @@ $mutations = @(
      to   = "    function conflictStillLive() {`n        return true;`n        if (!dirConflict)" },
   @{ name = 'M15 R3 丢弃数把自监控行也数上'; file = 'engine/pipeline.js'
      tests = 'isolation'; pattern = '冲突丢批不丢自监控行'
-     from = "            if (rows[i].selfMon !== true)`n                n += 1;"
+     from = "            if (rows[i].isDiagnostic !== true)`n                n += 1;"
      to   = "            n += 1;" },
   @{ name = 'M16 R5 冲突期攒下的自监控行永不补写'; file = 'engine/pipeline.js'
-     pattern = 'R5'; from = 'while (queue.length > 0 || retryBuffer.length > 0 || (deferredSelfMon !== null && !conflictStillLive())) {'
+     pattern = 'R5'; from = 'while (queue.length > 0 || retryBuffer.length > 0 || (deferredDiagnosticRow !== null && !conflictStillLive())) {'
      to   = 'while (queue.length > 0 || retryBuffer.length > 0) {' },
   @{ name = 'M17 R8 开关文件不占常驻持有（写盘期可被后写者覆盖）'; file = 'engine/switch-file.js'
      pattern = 'R8'; from = '            if (!claimSwitchKey(switchKey, failDir))'
@@ -136,7 +136,7 @@ $mutations = @(
      to   = 'const DIR_LEASE_WAIT_MS = 30;' },
 @{ name = 'M20 flush 循环不再排空重试位与诊断行（队列空 ≠ 全都写完了）'; file = 'engine/pipeline.js'
     tests = 'isolation'; pattern = '冲突期自监控行不丢'
-    from = 'while (queue.length > 0 || retryBuffer.length > 0 || (deferredSelfMon !== null && !conflictStillLive())) {'
+    from = 'while (queue.length > 0 || retryBuffer.length > 0 || (deferredDiagnosticRow !== null && !conflictStillLive())) {'
     to   = 'while (queue.length > 0) {' },
   # —— #24 追踪验收线（tests/trace-24.test.mjs）：child 继承与整链不截断也要能被咬住 ——
   @{ name = 'M21 child 不继承父链（来源降级成 none）'; file = 'client.js'
@@ -153,12 +153,12 @@ $mutations = @(
      to   = "        const key = ownedDirKey;`n        dirConflict = '';" },
   @{ name = 'M24 synced 收尾三重防线全拆（队列空即返回，N3）'; file = 'engine/pipeline.js'
      pattern = 'synced() 等待在途写盘（N3）'
-     from = 'if (queue.length === 0 && retryBuffer.length === 0 && !selfMonDue && !flushing && !flushQueued && !pendingPersistFail && flushInFlight === null)'
+     from = 'if (queue.length === 0 && retryBuffer.length === 0 && !diagnosticDue && !flushing && !flushQueued && !pendingPersistFail && flushInFlight === null)'
      to   = 'if (queue.length === 0 && retryBuffer.length === 0)' },
   @{ name = 'M37 synced 不补写攒下的诊断行（复核必改 1）'; file = 'engine/pipeline.js'
      tests = 'isolation'; pattern = '冲突闸门只丢用户行'
-     from = 'const selfMonDue = deferredSelfMon !== null && !conflictStillLive()'
-     to   = 'const selfMonDue = false' },
+     from = 'const diagnosticDue = deferredDiagnosticRow !== null && !conflictStillLive()'
+     to   = 'const diagnosticDue = false' },
   @{ name = 'M25 交还不延后（N6）：在途写盘期间就摘常驻持有'; file = 'store.js'
      pattern = 'release()'
      from = "                releasePendingKeys.push(key);`n            if (switchKey)`n                releasePendingKeys.push(switchKey);"
@@ -193,7 +193,7 @@ $mutations = @(
      to   = '                if (true) {' },
   @{ name = 'M33 客户端拒收不记丢弃（接缝）'; file = 'client/send.js'
      tests = 'e2e-030'; pattern = '接缝四'
-     from = '            logDroppedState.count += rc >= 0 ? Math.min(rc, entries.length) : entries.length;'
+     from = '            logDroppedState.count += rc >= 0 ? Math.min(rc, countable) : countable;'
      to   = '            void rc;' },
   @{ name = 'M34 重试位超限静默丢（R2 高水位）'; file = 'engine/pipeline.js'
      tests = 'isolation'; pattern = '写失败高水位'
@@ -202,11 +202,11 @@ $mutations = @(
   # —— 闸门那一批里的诊断行保护点（#19 复核必改 3）：删掉 defer、或让它取错行，都必须被咬住 ——
   @{ name = 'M35 闸门不保留诊断行（复核必改 3）'; file = 'engine/pipeline.js'
      tests = 'isolation'; pattern = '冲突闸门只丢用户行'
-     from = "            deferSelfMonRows(batch);`n            return 'dropped';"
+     from = "            deferDiagnosticRows(batch);`n            return 'dropped';"
      to   = "            return 'dropped';" },
   @{ name = 'M36 闸门保留的是批尾（吞用户行，复核必改 3）'; file = 'engine/pipeline.js'
      tests = 'isolation'; pattern = '冲突闸门只丢用户行'
-     from = '      if (batch[i].selfMon === true) {'
+     from = '      if (batch[i].isDiagnostic === true) {'
      to   = '      if (i === batch.length - 1) {' },
   # —— #25 验收线 A5：读侧文件集合退回「只认当日可写文件」，接缝不变式必须变红 ——
   # 锚点在 core/file-name.js（0.3.0 起文件名解析下沉到领域层）：daily 正则去掉可选序号段，
@@ -218,8 +218,8 @@ $mutations = @(
   # —— #26 验收线 A4 的两条咬点（客户端诚实计数与重试位）——
   @{ name = 'M39 客户端拒收按整批计（一行被拒报成整批丢）'; file = 'client/send.js'
      tests = 'client'; pattern = '转发失败先进重试位'
-     from = '            logDroppedState.count += rc >= 0 ? Math.min(rc, entries.length) : entries.length;'
-     to   = '            logDroppedState.count += entries.length;' },
+     from = '            logDroppedState.count += rc >= 0 ? Math.min(rc, countable) : countable;'
+     to   = '            logDroppedState.count += countable;' },
   @{ name = 'M40 客户端失败批次不回收（传输失败即丢 error）'; file = 'client/send.js'
      tests = 'client'; pattern = '转发失败先进重试位'
      from = '            logRetryState.rows = entries.slice();'
@@ -258,8 +258,8 @@ export const LOG_LEVEL_ORDER = ['error', 'warn', 'info', 'debug'] as const" },
   @{ name = 'M49 引擎面反向依赖客户端面（面与面互相认识）'; path = 'src\engine\io.ts'
      tests = 'arch'; pattern = '三个面互不认识'
      from = 'export interface EngineIoInput {'
-     to   = "import { createSendRig } from '../client/send.js';
-void createSendRig;
+     to   = "import { createSendStage } from '../client/send.js';
+void createSendStage;
 export interface EngineIoInput {" },
   @{ name = 'M47 platform 反向依赖引擎（分层线破）'; path = 'src\platform\ports.ts'
      tests = 'arch'; pattern = 'platform/ 只许 node:'
@@ -301,6 +301,23 @@ export interface LogTimer {" }
      tests = 'client'; pattern = 'log 回执与宿主同口径'
      from = "return 'skipped';"
      to   = "return 'queued';" }
+
+  # —— 2026-10-15 客户端丢弃计数与宿主同口径：只数用户行，库自己写的诊断行不算 ——
+  # M76 诊断行不打标记 → 转发汇总行混进计数（修前行为：1 行用户日志报成「丢 2 行」）。
+  @{ name = 'M76 诊断行不打 isDiagnostic 标记（汇总行被算成用户行）'; file = 'client/write.js'
+     tests = 'client'; pattern = '诊断行不计入丢弃'
+     from = '            isDiagnostic: isDiagnostic === true'
+     to   = '            isDiagnostic: false' }
+  # M77 计数不排除诊断行 → 退回 entries.length（修前行为）。
+  @{ name = 'M77 计数不排除诊断行（退回 entries.length）'; file = 'client/send.js'
+     tests = 'client'; pattern = '宿主长坏链条终止'
+     from = '            const countable = userRowCount(entries);'
+     to   = '            const countable = entries.length;' }
+  # M78 接线走错入口 → 库自己的三行没走 logDiagnostic，等于没标记。
+  @{ name = 'M78 接线走错入口（诊断行走了普通 log）'; file = 'client.js'
+     tests = 'client'; pattern = '诊断行不计入丢弃'
+     from = '        logDiagnostic: write.logDiagnostic,'
+     to   = '        logDiagnostic: write.log,' }
 
   # M57 封存照单全收：rename 调完就当搬走了，不回查目录（2026-10-14 soak 实测的旧行为：
   # 假适配器下整篇被覆写、20k 行静默丢 12500 行、dropped 仍是 0）。

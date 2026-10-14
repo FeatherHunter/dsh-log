@@ -3,14 +3,14 @@
 // 三件事：丢弃汇总行（有新增丢弃才记一行）、导出失败行（只散列不记原文）、开关看门狗（5 秒未落定记一行）。
 // 都不改变主流程的返回值：只旁观、只记录，失败自己吞掉。
 import { hash8 } from '../core/ids.js';
-export function createForwardRig(rig) {
+export function createForwardStage(input) {
     // 下面这些名字与搬运前的闭包自由变量同名，函数体一字不改（只有 logExportFail 的 hashFn 一行刻意改写，见上）。
-    const log = rig.log;
-    const logDroppedState = rig.dropped;
-    const logForwardState = rig.forward;
-    const timer = rig.timer;
-    const LOG_WATCHDOG_MS = rig.watchdogMs;
-    const hashFn = rig.hashFn;
+    const logDiagnostic = input.logDiagnostic;
+    const logDroppedState = input.dropped;
+    const logForwardState = input.forward;
+    const timer = input.timer;
+    const LOG_WATCHDOG_MS = input.watchdogMs;
+    const hashFn = input.hashFn;
     // 转发汇总行：批量发送落定后，有新增丢弃才记一行；无丢弃的窗口不打扰。
     // 汇总行本身走告警直通再触发下一次发送，下一次无新增丢弃即止，链条自然终止。
     // 字段带上宿主最近一次回包的 accepted/skipped/rejected（#26 验收线 A1：宿主如实报了，
@@ -37,7 +37,7 @@ export function createForwardRig(rig) {
         if (logForwardState.lastRejected >= 0)
             fields.rejected = logForwardState.lastRejected;
         try {
-            log('warn', 'log.forward.summary', fields);
+            logDiagnostic('warn', 'log.forward.summary', fields);
         }
         catch (e) {
             void e;
@@ -63,7 +63,7 @@ export function createForwardRig(rig) {
                 void eH;
                 hashed = hash8(sliced);
             }
-            log('warn', 'log.export.fail', { op: op, reason: reason, errorHash: hashed });
+            logDiagnostic('warn', 'log.export.fail', { op: op, reason: reason, errorHash: hashed });
         }
         catch (e) {
             void e;
@@ -89,7 +89,7 @@ export function createForwardRig(rig) {
             if (!settled) {
                 settled = true;
                 try {
-                    log('warn', 'log.switch.watchdog', { op: op, timeoutMs: LOG_WATCHDOG_MS, stage: 'waiting-host' });
+                    logDiagnostic('warn', 'log.switch.watchdog', { op: op, timeoutMs: LOG_WATCHDOG_MS, stage: 'waiting-host' });
                 }
                 catch (e) {
                     void e;

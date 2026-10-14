@@ -4,7 +4,7 @@
 // 落盘形状（五键行 + 保留字住 fields）由宿主侧 core/trace.ts 负责，两边不越界。
 import { genHex } from '../core/ids.js';
 import { isKnownLevel } from '../core/level.js';
-export function createTraceRig(input) {
+export function createTraceStage(input) {
     // 状态对象由调用方持有：child() 派生实例时共用同一份语义，但各自一份状态。
     const traceState = input.state;
     function ensureSpanId() {

@@ -88,6 +88,10 @@ export interface ClientQueuedRow {
   event: string
   fields: Record<string, unknown>
   truncated?: boolean
+  // 这一行是「库自己写的诊断行」（转发汇总行、保留字影子行……），不是调用方写的用户行。
+  // 用途：丢弃计数只数用户行——库自己的便签被拒收或被裁掉时，不该算成「你的日志丢了」。
+  // 与事件清单里 kind: 'selfmon' 说的是同一件事（清单那个值是公开数据格式，改名会破坏 0.3.0 用户）。
+  isDiagnostic?: boolean
 }
 
 

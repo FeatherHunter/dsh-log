@@ -59,7 +59,7 @@ export interface QueuedRow {
   fields: Record<string, unknown>
   // 自监控行（log.persist.fail 这类内部诊断）：不占用户配额、不算进 dropped、冲突期可留在待办位
   // 等闸门解除再落盘（#19 审查必改 R3：把它算进 dropped 会把「用户丢了几行」报大）。
-  selfMon?: boolean
+  isDiagnostic?: boolean
 }
 
 /** 记录电话（handleLogBatch）入参里的一条：调用方给的原始四元组，级别与事件名都还没验。 */

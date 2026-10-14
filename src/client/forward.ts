@@ -14,8 +14,9 @@ export interface ForwardState {
   lastRejected: number
 }
 
-export interface ForwardRigInput {
-  log: (level: string, event: string, fields: Record<string, unknown>) => void
+export interface ForwardStageInput {
+  /** 记一行诊断行（write 面的 logDiagnostic：同一条队列，但丢弃计数不算用户行）。 */
+  logDiagnostic: (level: string, event: string, fields: Record<string, unknown>) => void
   /** 累计丢弃数（只读）。 */
   dropped: { count: number }
   /** 汇总状态（就地更新）。 */
@@ -26,20 +27,20 @@ export interface ForwardRigInput {
   hashFn: ((s: string) => string) | null
 }
 
-export interface ForwardRig {
+export interface ForwardStage {
   maybeForwardSummary: () => void
   logExportFail: (op: string, reason: string, err: unknown) => void
   watchSwitchOp: (op: string, pending: unknown) => void
 }
 
-export function createForwardRig(rig: ForwardRigInput): ForwardRig {
+export function createForwardStage(input: ForwardStageInput): ForwardStage {
   // 下面这些名字与搬运前的闭包自由变量同名，函数体一字不改（只有 logExportFail 的 hashFn 一行刻意改写，见上）。
-  const log = rig.log
-  const logDroppedState = rig.dropped
-  const logForwardState = rig.forward
-  const timer = rig.timer
-  const LOG_WATCHDOG_MS = rig.watchdogMs
-  const hashFn = rig.hashFn
+  const logDiagnostic = input.logDiagnostic
+  const logDroppedState = input.dropped
+  const logForwardState = input.forward
+  const timer = input.timer
+  const LOG_WATCHDOG_MS = input.watchdogMs
+  const hashFn = input.hashFn
   // 转发汇总行：批量发送落定后，有新增丢弃才记一行；无丢弃的窗口不打扰。
   // 汇总行本身走告警直通再触发下一次发送，下一次无新增丢弃即止，链条自然终止。
   // 字段带上宿主最近一次回包的 accepted/skipped/rejected（#26 验收线 A1：宿主如实报了，
@@ -62,7 +63,7 @@ export function createForwardRig(rig: ForwardRigInput): ForwardRig {
     if (logForwardState.lastSkipped >= 0) fields.skipped = logForwardState.lastSkipped
     if (logForwardState.lastRejected >= 0) fields.rejected = logForwardState.lastRejected
     try {
-      log('warn', 'log.forward.summary', fields)
+      logDiagnostic('warn', 'log.forward.summary', fields)
     } catch (e) {
       void e
     }
@@ -86,7 +87,7 @@ export function createForwardRig(rig: ForwardRigInput): ForwardRig {
         void eH
         hashed = hash8(sliced)
       }
-      log('warn', 'log.export.fail', { op: op, reason: reason, errorHash: hashed })
+      logDiagnostic('warn', 'log.export.fail', { op: op, reason: reason, errorHash: hashed })
     } catch (e) {
       void e
     }
@@ -112,7 +113,7 @@ export function createForwardRig(rig: ForwardRigInput): ForwardRig {
       if (!settled) {
         settled = true
         try {
-          log('warn', 'log.switch.watchdog', { op: op, timeoutMs: LOG_WATCHDOG_MS, stage: 'waiting-host' })
+          logDiagnostic('warn', 'log.switch.watchdog', { op: op, timeoutMs: LOG_WATCHDOG_MS, stage: 'waiting-host' })
         } catch (e) {
           void e
         }

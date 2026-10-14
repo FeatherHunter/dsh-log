@@ -353,10 +353,12 @@ describe('客户端引擎单测（#560）', () => {
     let line = logger.logQueue[logger.logQueue.length - 1]
     assert.equal(line.event, 'log.export.fail')
     assert.ok(/^[0-9a-f]{8}$/.test(line.fields.errorHash || ''))
+    assert.equal(line.isDiagnostic, true, '导出失败行是库自己写的诊断行，必须带标记（丢弃计数不算它）')
     logger.logQueue.length = 0
     logger.logExportFail('openDir', 'open-fail', '打不开')
     line = logger.logQueue[logger.logQueue.length - 1]
     assert.ok(/^[0-9a-f]{8}$/.test(line.fields.errorHash || ''))
+    assert.equal(line.isDiagnostic, true, '第二条诊断行同样带标记')
   })
 
   it('自定义前缀隔离：转发与失败行方法名跟随前缀，不回落旧字面', async () => {
@@ -440,7 +442,7 @@ describe('客户端引擎单测（#560）', () => {
     assert.deepEqual(r1, r2)
   })
 
-  it('宿主长坏链条终止：重试有界，丢弃计数收敛不滋生', async () => {
+  it('宿主长坏链条终止：重试有界，丢弃计数只数用户行（库自己的诊断行不算丢）', async () => {
     const bad = { call() { return Promise.reject(new Error('宿主长坏')) } }
     const logger = createClientLog({ storage: makeStorage(), timer: makeTimer(), host: bad }, { pluginId: 'wf', prefix: 'wf' })
     logger.logSwitch.enabled = true
@@ -448,10 +450,33 @@ describe('客户端引擎单测（#560）', () => {
     // 首次 + 3 次重试＝重试到顶，10 行如实计数
     for (let i = 0; i < 4; i++) await logger.sendLogBatch()
     assert.equal(logger.getDroppedCount(), 10)
-    // 收敛不滋生：后面几轮只处理汇总行，计数最多再 +1，队列不被撑大
+    // 收敛不滋生：后面几轮只剩库自己写的转发汇总行，计数必须一动不动
+    // （修前会把这条诊断行也算进去 → 报 11；口径与宿主侧 userRowCount 对齐后才对得上）
     for (let i = 0; i < 10; i++) await logger.sendLogBatch()
-    assert.equal(logger.getDroppedCount(), 11, '收敛到「用户行 + 一条汇总行」，实测 ' + logger.getDroppedCount())
+    assert.equal(logger.getDroppedCount(), 10, '诊断行不计入 dropped，实测 ' + logger.getDroppedCount())
     assert.ok(logger.logQueue.length <= 1, '队列不被汇总行撑大，实测 ' + logger.logQueue.length)
+  })
+
+  // 2026-10-15：客户端丢弃计数与宿主侧对齐（只数用户行）。诊断行也是队列里的一行，
+  // 被拒收时若不排除，1 行用户日志会被报成「丢 2 行」——这条用例把「不算」和「真的标了」两件事都钉住。
+  it('诊断行不计入丢弃：只剩转发汇总行时 dropped 停住，且它自己带 isDiagnostic 标记', async () => {
+    const bad = { call() { return Promise.reject(new Error('宿主长坏')) } }
+    const logger = createClientLog({ storage: makeStorage(), timer: makeTimer(), host: bad }, { pluginId: 'wf', prefix: 'wf' })
+    logger.logSwitch.enabled = true
+    logger.log('warn', 'diag.only-one', {})
+    for (let i = 0; i < 4; i++) await logger.sendLogBatch()
+    assert.equal(logger.getDroppedCount(), 1, '1 行用户行就是 1，实测 ' + logger.getDroppedCount())
+    const summary = logger.logQueue.find((r) => r.event === 'log.forward.summary')
+    assert.ok(summary, '到顶后队列里应留下一条转发汇总行，实测 ' + JSON.stringify(logger.logQueue.map((r) => r.event)))
+    assert.equal(summary.isDiagnostic, true, '汇总行必须带 isDiagnostic 标记（否则它被拒时会被算成用户的行）')
+    // 再发若干轮：能发的只有这条诊断行，它被拒多少次都不许让计数上涨
+    for (let i = 0; i < 6; i++) await logger.sendLogBatch()
+    assert.equal(logger.getDroppedCount(), 1, '只剩诊断行时计数必须停住，实测 ' + logger.getDroppedCount())
+    // 用户行不带标记（对照，防「所有行都标上」的假实现）
+    logger.log('warn', 'diag.user-row', {})
+    const userRow = logger.logQueue.find((r) => r.event === 'diag.user-row')
+    assert.ok(userRow, '用户行应进队列')
+    assert.notEqual(userRow.isDiagnostic, true, '调用方自己写的行不许被标成诊断行')
   })
 
   it('宿主回 {ok:false} 却不报 rejected：按 entries.length - accepted 兜底，绝不静默丢账', async () => {

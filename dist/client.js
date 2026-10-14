@@ -27,12 +27,12 @@ import { assertPluginId, buildLogQueryPhoneName, buildPhoneNames, CLIENT_BATCH_I
 import { genHex, hash8 } from './core/ids.js';
 import { residentEventSet } from './core/resident.js';
 import { createSwitchCache } from './client/switch-cache.js';
-import { createTraceRig } from './client/trace.js';
+import { createTraceStage } from './client/trace.js';
 import { estimateBatchBytes } from './client/transport.js';
 import { createSwitchOps } from './client/switch-ops.js';
-import { createForwardRig } from './client/forward.js';
-import { createSendRig } from './client/send.js';
-import { createWriteRig } from './client/write.js';
+import { createForwardStage } from './client/forward.js';
+import { createSendStage } from './client/send.js';
+import { createWriteStage } from './client/write.js';
 export { buildPhoneName, buildPhoneNames, LOG_QUERY_ACTION_SUFFIX, buildLogQueryPhoneName } from './config.js';
 export const CLIENT_BATCH = {
     maxPerBatch: CLIENT_BATCH_MAX,
@@ -104,8 +104,10 @@ export function createClientLog(deps, configInput) {
     // 累计丢弃数：队列满丢弃、超包裁剪、转发失败都只计数不抛错。
     const logDroppedState = { count: 0 };
     // 转发汇总状态：只记上次汇总位置与最近一次丢弃原因，汇总行本身不逐条。
+    // lastSummaryAt 从「实例建成那一刻」起算：0 是「还没有计时起点」的哨兵，会让第一条汇总行
+    // 报出 epoch 量级的 windowMs（2026-10-15 真实样例里抓到过），所以这里就把它设为当下。
     const logForwardState = {
-        lastSummaryAt: 0,
+        lastSummaryAt: Date.now(),
         lastSummaryDropped: 0,
         lastReason: '',
         // 宿主最近一次回包里的三档计数（-1＝这一档宿主没说，汇总行不写这个键）。
@@ -139,13 +141,13 @@ export function createClientLog(deps, configInput) {
     const setLogSwitchGen = { n: 0 };
     // 追踪状态（0.3.0 #20+#24 写侧：显式继承 + 自动建链占位；另一路 store.ts 只管落盘形状）。
     const traceState = { traceId: null, spanId: null, seq: 0, traceSource: 'none', spanSource: 'none', shadowWarns: 0 };
-    const trace = createTraceRig({ state: traceState });
+    const trace = createTraceStage({ state: traceState });
     const ensureSpanId = () => trace.ensureSpanId();
     const ensureTraceForLevel = (level) => trace.ensureForLevel(level);
     // 主写路径已下沉 client/write.ts（S6）：留同名包装，调用点一字不改。
     // 发送面在写路径之后建立，用一次性转发解环（调用都发生在运行期，建库期不自杀）。
     let sendBatchRef = () => Promise.resolve({ ok: false, sent: 0 });
-    const write = createWriteRig({
+    const write = createWriteStage({
         getSwitchEnabled: () => logSwitch.enabled,
         // 常驻集合单源在 core/resident.ts：包内固定 43 条 ∪ 调用方清单里 kind === 'resident' 的事件。
         // 客户端清单由 createClientLog 的 configInput.eventList 传入（字符串路径形式本包不读盘，
@@ -168,8 +170,10 @@ export function createClientLog(deps, configInput) {
     const dropForRoom = (level) => write.dropForRoom(level);
     const scheduleLogFlush = (immediate) => write.scheduleLogFlush(immediate);
     // 转发面自监控已下沉 client/forward.ts（S6）：留同名包装，调用点一字不改。
-    const forward = createForwardRig({
-        log: log,
+    // 它写的三行（转发汇总/导出失败/开关看门狗）都是库自己的诊断行，所以走 write.logDiagnostic：
+    // 同一条队列，但发送面统计丢弃时不算成用户的行。
+    const forward = createForwardStage({
+        logDiagnostic: write.logDiagnostic,
         dropped: logDroppedState,
         forward: logForwardState,
         timer: timer,
@@ -180,7 +184,7 @@ export function createClientLog(deps, configInput) {
     const logExportFail = (op, reason, err) => forward.logExportFail(op, reason, err);
     const watchSwitchOp = (op, pending) => forward.watchSwitchOp(op, pending);
     // 发送面已下沉 client/send.ts（S6）：留同名包装，调用点一字不改。
-    const send = createSendRig({
+    const send = createSendStage({
         host: host,
         phoneNames: phoneNames,
         queue: logQueue,
@@ -189,7 +193,6 @@ export function createClientLog(deps, configInput) {
         forward: logForwardState,
         flushTimer: logFlushTimer,
         timer: timer,
-        log: log,
         laterRun: laterRun,
         maybeForwardSummary: maybeForwardSummary,
         scheduleLogFlush: scheduleLogFlush

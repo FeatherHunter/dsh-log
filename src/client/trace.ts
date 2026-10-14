@@ -6,12 +6,12 @@ import { genHex } from '../core/ids.js'
 import { isKnownLevel } from '../core/level.js'
 import type { TraceState } from './types.js'
 
-export interface TraceRig {
+export interface TraceStage {
   ensureSpanId: () => string
   ensureForLevel: (level: string) => string | null
 }
 
-export function createTraceRig(input: { state: TraceState }): TraceRig {
+export function createTraceStage(input: { state: TraceState }): TraceStage {
   // 状态对象由调用方持有：child() 派生实例时共用同一份语义，但各自一份状态。
   const traceState = input.state
 function ensureSpanId(): string {

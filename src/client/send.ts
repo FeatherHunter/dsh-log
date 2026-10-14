@@ -18,7 +18,7 @@ const LOG_BATCH_MAX = CLIENT_BATCH_MAX
 const LOG_PACKET_BYTES = CLIENT_PACKET_BYTES
 const LOG_QUEUE_MAX = CLIENT_QUEUE_MAX
 
-export interface SendRigInput {
+export interface SendStageInput {
   host: ClientHost | null
   phoneNames: PhoneNameMap
   /** 待发队列（就地取批）。 */
@@ -29,32 +29,39 @@ export interface SendRigInput {
   forward: ForwardState
   flushTimer: { id: unknown }
   timer: ClientTimer | null
-  log: (level: string, event: string, fields: Record<string, unknown>) => void
   laterRun: (fn: () => void, ms: number) => unknown
   maybeForwardSummary: () => void
   scheduleLogFlush: (immediate: boolean) => void
 }
 
-export interface SendRig {
+export interface SendStage {
   sendLogBatch: () => Promise<ClientSendResult>
   flush: () => { ok: boolean }
   getDroppedCount: () => number
 }
 
-export function createSendRig(rig: SendRigInput): SendRig {
+export function createSendStage(input: SendStageInput): SendStage {
   // 下面这些名字与搬运前的闭包自由变量同名，函数体一字不改。
-  const host = rig.host
-  const phoneNames = rig.phoneNames
-  const logQueue = rig.queue
-  const logRetryState = rig.retry
-  const logDroppedState = rig.dropped
-  const logForwardState = rig.forward
-  const logFlushTimer = rig.flushTimer
-  const timer = rig.timer
-  const log = rig.log
-  const laterRun = rig.laterRun
-  const maybeForwardSummary = rig.maybeForwardSummary
-  const scheduleLogFlush = rig.scheduleLogFlush
+  const host = input.host
+  const phoneNames = input.phoneNames
+  const logQueue = input.queue
+  const logRetryState = input.retry
+  const logDroppedState = input.dropped
+  const logForwardState = input.forward
+  const logFlushTimer = input.flushTimer
+  const timer = input.timer
+  const laterRun = input.laterRun
+  const maybeForwardSummary = input.maybeForwardSummary
+  const scheduleLogFlush = input.scheduleLogFlush
+
+  // 丢弃计数只数「用户行」：库自己写的诊断行（转发汇总行——它自己也被送进来发）被拒收、
+  // 被裁掉或被丢掉时都不算账，否则「你丢 1 行」会被报成「丢 2 行」。
+  // 宿主侧同款：engine/pipeline.ts 的 userRowCount（口径必须一致，两侧都叫这个词）。
+  function userRowCount(rows: ClientQueuedRow[]): number {
+    let n = 0
+    for (let i = 0; i < rows.length; i += 1) if (rows[i].isDiagnostic !== true) n += 1
+    return n
+  }
   // 失败落定：能重试就排一次退避重试（次数有界），到顶才如实计入丢弃并清空重试位。
   // 计数口径（诚实）：宿主明确拒收时只算它拒的那几行（rejected），传输失败才算整批。
   function settleSendFailure(reason: string, entries: ClientQueuedRow[], onlySummary: boolean): ClientSendResult {
@@ -75,7 +82,8 @@ export function createSendRig(rig: SendRigInput): SendRig {
       }
     } else {
       const rc = logRetryState.rejectCount
-      logDroppedState.count += rc >= 0 ? Math.min(rc, entries.length) : entries.length
+      const countable = userRowCount(entries)
+      logDroppedState.count += rc >= 0 ? Math.min(rc, countable) : countable
       logRetryState.rows = []
       logRetryState.rejectCount = -1
       logRetryState.attempts = 0
@@ -97,19 +105,20 @@ export function createSendRig(rig: SendRigInput): SendRig {
     let trimmed = 0
     // 超包裁剪分级保 error：error 行不被裁掉，只裁普通行（warn/info/debug 均为可裁行）；
     // 尾部优先（与修前 pop 同序，全普通行时与修前一字不差）；全 error 超包也不裁，整包发出。
+    // 裁掉的行若本来就是库自己的诊断行，不进丢弃计数（只数用户行）。
     while (entries.length > 1 && estimateBatchBytes(entries) > LOG_PACKET_BYTES) {
       const victim = findTrimmableIndex(entries, 'newest-first')
       if (victim < 0) break
+      if (entries[victim].isDiagnostic !== true) trimmed += 1
       entries.splice(victim, 1)
-      trimmed += 1
     }
     // 队列里还压着超过 100 条说明消费跟不上：只留 100 条，其余丢弃并计数（不无界缓冲）。
     // 积压裁剪同样分级保 error：只裁最旧普通行，全 error 积压也不裁。
     while (logQueue.length > LOG_QUEUE_MAX) {
       const victim = findTrimmableIndex(logQueue, 'oldest-first')
       if (victim < 0) break
+      if (logQueue[victim].isDiagnostic !== true) trimmed += 1
       logQueue.splice(victim, 1)
-      trimmed += 1
     }
     if (trimmed > 0) {
       logDroppedState.count += trimmed
@@ -124,8 +133,8 @@ export function createSendRig(rig: SendRigInput): SendRig {
     // 防自激：这一批如果只剩上一行汇总自己，失败只计数不再记新汇总，否则汇总会自己养活自己停不下来。
     const onlySummary = entries.length === 1 && entries[0] && entries[0].event === 'log.forward.summary'
     if (!host || typeof host.call !== 'function') {
-      // 压根没有宿主可发（不是暂时不可用）：重试没意义，如实整批计数。
-      logDroppedState.count += entries.length
+      // 压根没有宿主可发（不是暂时不可用）：重试没意义，如实整批计数（仍只数用户行）。
+      logDroppedState.count += userRowCount(entries)
       logForwardState.lastReason = 'send-fail'
       if (!onlySummary) maybeForwardSummary()
       return Promise.resolve({ ok: false, sent: 0 })

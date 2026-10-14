@@ -108,7 +108,7 @@ export function createPipeline(input) {
     function userRowCount(rows) {
         let n = 0;
         for (let i = 0; i < rows.length; i += 1)
-            if (rows[i].selfMon !== true)
+            if (rows[i].isDiagnostic !== true)
                 n += 1;
         return n;
     }
@@ -131,7 +131,7 @@ export function createPipeline(input) {
     let retryAttempts = 0;
     // 冲突期攒下的自监控行（只有一行，不进队列、不占配额、不计 dropped）：等闸门解除后的下一轮 flush 落盘，
     // 绝不因为「自己刚判了冲突」把这条诊断本身也丢掉（#19 审查必改 R3/R5）。
-    let deferredSelfMon = null;
+    let deferredDiagnosticRow = null;
     // 跨进程可观测（2026-10-14 四维审查必改 4）：记住自己上次写完这份文件的字节数，下次读回来对不上，
     // 就说明这份文件被**别的写者**动过（另一个进程，或同进程里的另一份模块副本）。零额外 IO——这次读本来就要做。
     // 它只是「事后发现」：挡不住读改写窗口内的并发覆写，也猜不出被吃了几行，所以只留诊断、不谎报 dropped。
@@ -240,12 +240,12 @@ export function createPipeline(input) {
             return 'skipped';
         // 目录冲突（#19 隔离）：本实例的行绝不入队——绝不混进别人的共享文件；只计数，并当场抛中文错点明出路（绝不静默丢）。
         // 先自愈再判：持有者走了就不再拦（#19 审查必改 R2）；自愈时顺手催一次刷盘，好让冲突期攒下的
-        // 自监控行（deferredSelfMon）落盘（#19 审查必改 R5）。
+        // 自监控行（deferredDiagnosticRow）落盘（#19 审查必改 R5）。
         if (conflictStillLive()) {
             dropped += 1;
             throw new Error(conflictMessage());
         }
-        if (deferredSelfMon) {
+        if (deferredDiagnosticRow) {
             try {
                 scheduleFlush(false);
             }
@@ -258,7 +258,7 @@ export function createPipeline(input) {
     // 入队本体（不含冲突闸门）：自监控行 log.persist.fail 必须走这里——它记的就是「本实例刚被判冲突」，
     // 若也走 log() 会被自己刚设上的 dirConflict 抛掉（自监控行永远写不出来），而且那次抛错还会被
     // catch 吞掉、顺手把 dropped 多记一笔（#19 审查必改 3）。
-    function enqueueRow(level, event, fields, selfMon) {
+    function enqueueRow(level, event, fields, isDiagnostic) {
         // 同形 error 折叠（阈值见上：1000ms 窗口内 ≥10 次同 event+fields散列连击折叠为 1 行 error repeated N）。
         if (isErrorLevel(level)) {
             const now = Date.now();
@@ -323,14 +323,14 @@ export function createPipeline(input) {
             foldFields = null;
         }
         // 自监控行不占用户配额（它是内部诊断，丢了就没人知道出过事），也不计 dropped。
-        if (!selfMon && !admitRow(level))
+        if (!isDiagnostic && !admitRow(level))
             return 'dropped';
         queue.push({
             ts: Date.now(),
             level: level,
             event: String(event || ''),
             fields: fields && typeof fields === 'object' ? fields : {},
-            selfMon: selfMon === true
+            isDiagnostic: isDiagnostic === true
         });
         if (isUrgentLevel(level))
             scheduleFlush(true);
@@ -426,7 +426,7 @@ export function createPipeline(input) {
             const first = findEvictableIndex(retryBuffer);
             const idx = first >= 0 ? first : 0;
             const row = retryBuffer.splice(idx, 1)[0];
-            if (row && row.selfMon !== true) {
+            if (row && row.isDiagnostic !== true) {
                 dropped += 1;
                 emitOnDrop('write-fail');
             }
@@ -442,10 +442,10 @@ export function createPipeline(input) {
             flushing = true;
             try {
                 // 待办自监控行优先补写：闸门还关着就继续留着——绝不因为「冲突」把这条诊断本身也丢掉（R3/R5）。
-                while (queue.length > 0 || retryBuffer.length > 0 || (deferredSelfMon !== null && !conflictStillLive())) {
-                    if (deferredSelfMon !== null && !conflictStillLive()) {
-                        queue.push(deferredSelfMon);
-                        deferredSelfMon = null;
+                while (queue.length > 0 || retryBuffer.length > 0 || (deferredDiagnosticRow !== null && !conflictStillLive())) {
+                    if (deferredDiagnosticRow !== null && !conflictStillLive()) {
+                        queue.push(deferredDiagnosticRow);
+                        deferredDiagnosticRow = null;
                     }
                     // 重试位里的行更旧：先写它们，写失败的那批不许插到新行后面（顺序即时间序）。
                     const batch = retryBuffer.length > 0 ? retryBuffer.splice(0, retryBuffer.length) : queue.splice(0, queue.length);
@@ -471,7 +471,7 @@ export function createPipeline(input) {
                         scheduleRetry();
                         break;
                     }
-                    // 'dropped'（目录冲突 / 取不到目录）：writeBatch 内部已按用户行计数，继续下一轮（可能还有 deferredSelfMon）。
+                    // 'dropped'（目录冲突 / 取不到目录）：writeBatch 内部已按用户行计数，继续下一轮（可能还有 deferredDiagnosticRow）。
                 }
             }
             finally {
@@ -502,12 +502,12 @@ export function createPipeline(input) {
                             // 但绝不能被自己的抛错吞掉——先进待办位，闸门解除后的下一轮 flush 再落盘（#19 审查必改 R3/R5）。
                             if (isEnabled('warn', 'log.persist.fail')) {
                                 if (conflictStillLive()) {
-                                    deferredSelfMon = {
+                                    deferredDiagnosticRow = {
                                         ts: Date.now(),
                                         level: 'warn',
                                         event: 'log.persist.fail',
                                         fields: failFields,
-                                        selfMon: true
+                                        isDiagnostic: true
                                     };
                                 }
                                 else {
@@ -562,8 +562,8 @@ export function createPipeline(input) {
             // log.persist.fail 诊断行（flushNow 的 finally 入队）使 queue.length !== 0，于是外层循环无论如何都会再调一次
             // flushNow 把重试位带走。探针实证：把这一句从两处删掉，同一场景仍然 pending=0 且行如实落盘（行为逐项相同）。
             // 保留它的理由＝将来若有人改 flushNow 的取批顺序或循环条件，这里仍能独立守住「synced() 返回即已落盘」。
-            const selfMonDue = deferredSelfMon !== null && !conflictStillLive();
-            if (queue.length === 0 && retryBuffer.length === 0 && !selfMonDue && !flushing && !flushQueued && !pendingPersistFail && flushInFlight === null)
+            const diagnosticDue = deferredDiagnosticRow !== null && !conflictStillLive();
+            if (queue.length === 0 && retryBuffer.length === 0 && !diagnosticDue && !flushing && !flushQueued && !pendingPersistFail && flushInFlight === null)
                 break;
             try {
                 await flushNow();
@@ -571,7 +571,7 @@ export function createPipeline(input) {
             catch (e) {
                 void e;
             }
-            if (queue.length === 0 && retryBuffer.length === 0 && !selfMonDue && !flushing && !flushQueued && !pendingPersistFail && flushInFlight === null)
+            if (queue.length === 0 && retryBuffer.length === 0 && !diagnosticDue && !flushing && !flushQueued && !pendingPersistFail && flushInFlight === null)
                 break;
             if (flushing || flushQueued || flushInFlight !== null) {
                 try {
@@ -632,12 +632,12 @@ export function createPipeline(input) {
     }
     // 一批被拒（目录冲突/取不到目录）时，把批里的**自监控行**留到待办位：它记的是「本实例刚出过事」，
     // 跟着用户行一起丢就等于把唯一的诊断线索也丢了（#19 审查必改 R3/R5）。用户行照旧只计数不写盘。
-    function deferSelfMonRows(batch) {
-        if (deferredSelfMon !== null)
+    function deferDiagnosticRows(batch) {
+        if (deferredDiagnosticRow !== null)
             return;
         for (let i = 0; i < batch.length; i += 1) {
-            if (batch[i].selfMon === true) {
-                deferredSelfMon = batch[i];
+            if (batch[i].isDiagnostic === true) {
+                deferredDiagnosticRow = batch[i];
                 return;
             }
         }
@@ -656,7 +656,7 @@ export function createPipeline(input) {
         // 自监控行留着补写（诊断行不是被丢的日志，不进 dropped）。
         if (conflictStillLive()) {
             dropped += userCount;
-            deferSelfMonRows(batch);
+            deferDiagnosticRows(batch);
             return 'dropped';
         }
         for (let i = 0; i < batch.length; i++) {
@@ -671,7 +671,7 @@ export function createPipeline(input) {
             }
             catch (e) {
                 void e;
-                if (batch[i].selfMon !== true)
+                if (batch[i].isDiagnostic !== true)
                     dropped += 1;
             }
         }
@@ -698,7 +698,7 @@ export function createPipeline(input) {
             dirUse = await acquireDirForWrite(logDir, 'writeBatch');
             if (!dirUse) {
                 dropped += userCount;
-                deferSelfMonRows(batch);
+                deferDiagnosticRows(batch);
                 return 'dropped';
             }
             await ensureLogDir(logDir);
@@ -1071,7 +1071,7 @@ export function createPipeline(input) {
         return lastPersistFail;
     }
     function getPendingCount() {
-        return queue.length + retryBuffer.length + (deferredSelfMon !== null ? 1 : 0);
+        return queue.length + retryBuffer.length + (deferredDiagnosticRow !== null ? 1 : 0);
     }
     return {
         log: log,

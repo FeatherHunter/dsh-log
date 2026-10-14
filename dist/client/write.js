@@ -11,19 +11,19 @@ import { relocateReservedFields, SHADOW_FIELD } from '../core/trace.js';
 // 与 client.ts 的公开常量同源（配置面），本地取同名以免搬动函数体。
 const LOG_FLUSH_MS = CLIENT_BATCH_INTERVAL_MS;
 const LOG_QUEUE_MAX = CLIENT_QUEUE_MAX;
-export function createWriteRig(rig) {
+export function createWriteStage(input) {
     // 下面这些名字与搬运前的闭包自由变量同名，函数体除开关判定外一字不改。
-    const getSwitchEnabled = rig.getSwitchEnabled;
-    const logQueue = rig.queue;
-    const logDroppedState = rig.dropped;
-    const logForwardState = rig.forward;
-    const logFlushTimer = rig.flushTimer;
-    const traceState = rig.traceState;
-    const ensureSpanId = rig.ensureSpanId;
-    const ensureTraceForLevel = rig.ensureTraceForLevel;
-    const sendLogBatch = rig.sendLogBatch;
-    const timer = rig.timer;
-    const residentEvents = rig.residentEvents;
+    const getSwitchEnabled = input.getSwitchEnabled;
+    const logQueue = input.queue;
+    const logDroppedState = input.dropped;
+    const logForwardState = input.forward;
+    const logFlushTimer = input.flushTimer;
+    const traceState = input.traceState;
+    const ensureSpanId = input.ensureSpanId;
+    const ensureTraceForLevel = input.ensureTraceForLevel;
+    const sendLogBatch = input.sendLogBatch;
+    const timer = input.timer;
+    const residentEvents = input.residentEvents;
     // 读当前级别与事件名是否允许产生日志；关闭时调用处直接返回。错误与告警始终允许；
     // 信息级里落在常驻集合的也始终允许（#731 根因：从前只看级别，常驻信息全被开关拦掉）。
     // 集合 = 包内固定 43 条 ∪ 调用方清单里 kind === 'resident' 的事件（core/resident.ts 单源）。
@@ -68,7 +68,9 @@ export function createWriteRig(rig) {
     // 0.3.0 追踪：保留字 traceId/spanId/seq 永不拒收——冲突重命名进 fields._shadow 并 warn 计数，
     // error 本体照落；落盘行带 v:3（读侧先认 v，v!=3 跳过+计数不抛错）。
     // 回执与宿主侧 store.log() 同口径（LogOutcome）：调用方能当场看出「记上了 / 被开关挡下 / 满了丢了」。
-    function log(level, event, fields) {
+    // 第四个参数留给库自己：isDiagnostic 为真时这一行是库写的便签（汇总行、影子行），
+    // 发送面统计丢弃时不计它——否则「你丢 1 行」会被报成「丢 2 行」。调用方只需用三个参数的 log。
+    function log(level, event, fields, isDiagnostic) {
         if (!isEnabled(level, event))
             return 'skipped';
         if (logQueue.length >= LOG_QUEUE_MAX) {
@@ -94,7 +96,8 @@ export function createWriteRig(rig) {
                         ts: Date.now(),
                         level: 'warn',
                         event: 'log.trace.shadow',
-                        fields: { event: String(event || ''), shadowed: Object.keys(shadow) }
+                        fields: { event: String(event || ''), shadowed: Object.keys(shadow) },
+                        isDiagnostic: true
                     });
                 }
             }
@@ -137,13 +140,19 @@ export function createWriteRig(rig) {
             ts: Date.now(),
             level: level,
             event: String(event || ''),
-            fields: out
+            fields: out,
+            isDiagnostic: isDiagnostic === true
         });
         if (isUrgentLevel(level))
             scheduleLogFlush(true);
         else
             scheduleLogFlush(false);
         return 'queued';
+    }
+    // 库自己的诊断行专用入口（转发汇总行、导出失败行、开关看门狗行都走这里）：
+    // 与 log 同一条队列，只是打上 isDiagnostic 标记，发送面统计丢弃时会跳过它。
+    function logDiagnostic(level, event, fields) {
+        return log(level, event, fields, true);
     }
     // 安排一次转发：普通走 1000 毫秒防抖合并；错误与告警走直通（取消本次等待立刻发，
     // 但调用处仍只进队列就返回，不等转发完成，崩溃窗口只剩毫秒级）。
@@ -178,5 +187,11 @@ export function createWriteRig(rig) {
             sendLogBatch();
         }, LOG_FLUSH_MS);
     }
-    return { log: log, isEnabled: isEnabled, dropForRoom: dropForRoom, scheduleLogFlush: scheduleLogFlush };
+    return {
+        log: log,
+        logDiagnostic: logDiagnostic,
+        isEnabled: isEnabled,
+        dropForRoom: dropForRoom,
+        scheduleLogFlush: scheduleLogFlush
+    };
 }

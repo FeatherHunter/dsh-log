@@ -1,6 +1,6 @@
 {
   "name": "dsh-log",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "可复用的日志系统：宿主落盘引擎（0.3.0：默认 1 行可用、存时硬隔离查时授权聚合、五键行、error 永不丢；不兼容 0.2.x）",
   "license": "MIT",
   "author": "王辰浩",

@@ -40,6 +40,7 @@ export interface ClientQueuedRow {
     event: string;
     fields: Record<string, unknown>;
     truncated?: boolean;
+    isDiagnostic?: boolean;
 }
 export interface ClientSendResult {
     ok: boolean;
