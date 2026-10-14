@@ -14,7 +14,10 @@ import type { CliOptions } from './args.js'
 
 /** 开关文件是日志目录的**兄弟**：`logs-<id>/` 旁边是 `log-switch-<id>.json`，`logs/` 旁边是 `log-switch.json`。 */
 export function switchCandidates(dir: string): string[] {
-  const parts = dir.split(/[\\/]/)
+  // 先去掉结尾的分隔符：`./logs-my-plugin/` 与 `./logs-my-plugin` 是同一个目录，
+  // 不处理的话前者会被当成「名字是空的」，开关文件就永远认不出来（unknown 挂在那儿没人知道为什么）。
+  const cleaned = dir.replace(/[\\/]+$/, '')
+  const parts = cleaned.split(/[\\/]/)
   const base = parts[parts.length - 1] ?? ''
   const parent = parts.slice(0, -1).join('/')
   const prefix = parent === '' ? '' : parent + '/'
@@ -58,7 +61,8 @@ export async function collectExport(entry: LogDir): Promise<LogExport> {
 
 /**
  * 交日志：默认输出「摘要 + 原始行」（贴工单、当附件都够）；
- * `--json` 只输出摘要对象（一个 JSON，给脚本用；要行就用 `tail --json`）。
+ * `--json` 只输出摘要对象——**每个目录一行**（一个目录就是一行，多个目录就是 NDJSON），
+ * 给脚本用；要行就用 `tail --json`。
  */
 export async function runExport(dirs: readonly LogDir[], options: CliOptions): Promise<number> {
   const parts: string[] = []

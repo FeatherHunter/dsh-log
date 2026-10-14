@@ -171,4 +171,42 @@ describe('CLI export：把目录交出去', () => {
       await rm(cacheDir, { recursive: true, force: true })
     }
   })
+
+  it('路径结尾多一个分隔符也认：`logs-x/` 与 `logs-x` 同一个目录，开关文件照样找得到', async () => {
+    const cacheDir = await makeCacheDir()
+    try {
+      await mkdir(path.join(cacheDir, 'logs-slash'), { recursive: true })
+      await writeFile(path.join(cacheDir, 'logs-slash', '2026-10-15.log'), rowOf(1791980000000, 'warn', 'slash.row', {}) + '\n', 'utf8')
+      await writeFile(path.join(cacheDir, 'log-switch-slash.json'), '{"enabled":true}', 'utf8')
+      const res = await runCli(['export', path.join(cacheDir, 'logs-slash') + path.sep])
+      assert.equal(res.code, 0, res.stderr)
+      assert.ok(res.stdout.indexOf('slash.row') >= 0)
+      assert.ok(res.stdout.indexOf('开关: {"enabled":true}') >= 0, '结尾带分隔符不该让开关变成 unknown')
+    } finally {
+      await rm(cacheDir, { recursive: true, force: true })
+    }
+  })
+
+  it('多个目录：默认各出一段（都带自己的目录名）；--json 每目录一行（NDJSON）', async () => {
+    const cacheDir = await makeCacheDir()
+    try {
+      for (const id of ['multi-a', 'multi-b']) {
+        await mkdir(path.join(cacheDir, 'logs-' + id), { recursive: true })
+        await writeFile(path.join(cacheDir, 'logs-' + id, '2026-10-15.log'), rowOf(1791980000000, 'warn', id + '.row', {}) + '\n', 'utf8')
+      }
+      const text = await runCli(['export', path.join(cacheDir, 'logs-multi-a'), path.join(cacheDir, 'logs-multi-b')])
+      assert.equal(text.code, 0, text.stderr)
+      assert.equal((text.stdout.match(/# dsh-log 目录摘要/g) || []).length, 2, '每个目录一段摘要')
+      assert.ok(text.stdout.indexOf('multi-a.row') >= 0 && text.stdout.indexOf('multi-b.row') >= 0)
+
+      const json = await runCli(['export', path.join(cacheDir, 'logs-multi-a'), path.join(cacheDir, 'logs-multi-b'), '--json'])
+      assert.equal(json.code, 0, json.stderr)
+      const lines = json.stdout.trim().split('\n')
+      assert.equal(lines.length, 2, '每个目录一行 JSON（NDJSON）')
+      const digests = lines.map((line) => JSON.parse(line))
+      assert.deepEqual(digests.map((d) => d.dir).sort(), [path.join(cacheDir, 'logs-multi-a'), path.join(cacheDir, 'logs-multi-b')].sort())
+    } finally {
+      await rm(cacheDir, { recursive: true, force: true })
+    }
+  })
 })

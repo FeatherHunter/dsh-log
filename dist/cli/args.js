@@ -32,7 +32,7 @@ export const USAGE = `dsh-log —— 看日志、交日志（只读）
   -v, --version         显示版本号
 
 选项（export）：
-      --json            只输出摘要对象（一个 JSON）；要行就用 tail --json
+      --json            只输出摘要对象（每个目录一行，多个目录就是 NDJSON）；要行就用 tail --json
       （筛选类选项对 export 没有意义，传了会当场报错，不静默忽略）
 
 例子：

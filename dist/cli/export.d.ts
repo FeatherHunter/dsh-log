@@ -12,6 +12,7 @@ export interface LogExport {
 export declare function collectExport(entry: LogDir): Promise<LogExport>;
 /**
  * 交日志：默认输出「摘要 + 原始行」（贴工单、当附件都够）；
- * `--json` 只输出摘要对象（一个 JSON，给脚本用；要行就用 `tail --json`）。
+ * `--json` 只输出摘要对象——**每个目录一行**（一个目录就是一行，多个目录就是 NDJSON），
+ * 给脚本用；要行就用 `tail --json`。
  */
 export declare function runExport(dirs: readonly LogDir[], options: CliOptions): Promise<number>;
